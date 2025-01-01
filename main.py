@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--train-device", '-d', type=str, default="cpu")
     parser.add_argument("--learning-rate", '-lr', type=float, default=0.001,
                         help="Learning rate for training (default=0.001)")
+    parser.add_argument("--save-path", "-s", type=str, default=None,
+                        help="Path to save the trained model.")
 
     # 모델 경로
     parser.add_argument("--pretrained-model-path", "-p", type=str, default=None,
@@ -47,7 +49,13 @@ def main():
 
 
     args = parser.parse_args()
-
+    
+    if args.pretrained_model_path is not None and not args.pretrained_model_path.startswith('models/'):
+        args.pretrained_model_path = f'models/{args.pretrained_model_path}'
+        
+    if args.save_path is not None and not args.save_path.startswith('models/'):
+        args.save_path = f'models/{args.save_path}'
+        
     # --------------------------------------------------------
     # 1) 학습(train)
     # --------------------------------------------------------
@@ -64,7 +72,8 @@ def main():
             learning_rate=args.learning_rate,
             capacity=args.capacity,
             device=args.device,
-            pretrained_model_path=args.pretrained_model_path
+            pretrained_model_path=args.pretrained_model_path,
+            save_model_path=args.save_path
         )
 
     # --------------------------------------------------------
@@ -91,4 +100,5 @@ if __name__ == "__main__":
 
 """
 python main.py --train --board-size 5 --num-iterations 30 --games-per-iteration 3 --num-simulations 100 --batch-size 16 --epochs 100 --capacity 100 --device mps
+python main.py --train --board-size 5 --num-iterations 50 --games-per-iteration 3 --num-simulations 100 --batch-size 16 --epochs 100 --capacity 1000 --device mps -s super_cho_pha_go
 """

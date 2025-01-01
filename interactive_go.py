@@ -1,9 +1,11 @@
 import numpy as np
 import pygame
 import torch
-
+import warnings
 from go.go_board import State
 from cho_pha_go_train import AlphaGoZeroNet
+
+warnings.filterwarnings("ignore")
 
 class InteractiveGo:
     def __init__(self, 

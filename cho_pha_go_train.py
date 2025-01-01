@@ -7,7 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from go.go_board import State
+import warnings
+from utils import timeit
 
+warnings.filterwarnings("ignore", category=UserWarning)
 
 #####################################
 # 1. 알파고 제로 신경망 정의
@@ -227,6 +230,7 @@ class MCTSNode:
 #####################################
 # 4. 자가 대국(self-play)
 #####################################
+@timeit
 def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, temperature=1.0):
     """
     한 판을 완주할 때까지 MCTS로 행동을 선택하고,
@@ -346,6 +350,34 @@ class ReplayBuffer:
 #####################################
 # 6. 모델 학습 함수
 #####################################
+@timeit
+def _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
+    states, action_probs, results = replay_buffer.sample(batch_size)
+    if states is None:
+        print("Not enough samples in replay buffer.")
+        return False
+
+    # 순전파
+    policy_output, value_output = model(states.to(model.device))
+
+    # (1) Policy Loss: 크로스 엔트로피 (또는 음의 로그 우도)
+    #    action_probs(타겟)와 policy_output(예측) 간 비교
+    policy_loss = -torch.sum(action_probs * torch.log(policy_output + 1e-7), dim=1).mean()
+
+    # (2) Value Loss: MSE
+    value_output = value_output.squeeze()  # shape: (B,)
+    value_loss = F.mse_loss(value_output, results)
+
+    loss = policy_loss + value_loss
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    model.losses[len(model.losses)].append(loss.item())
+    print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
+    return True
+
 def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, optimizer_state_dict=None):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     if optimizer_state_dict is not None:
@@ -354,30 +386,9 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
     # iteration 마다 loss 들을 저장하는 리스트
     model.losses[len(model.losses)+1] = []
     for epoch in range(epochs):
-        states, action_probs, results = replay_buffer.sample(batch_size)
-        if states is None:
-            print("Not enough samples in replay buffer.")
+        if not _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
             break
-
-        # 순전파
-        policy_output, value_output = model(states.to(model.device))
-
-        # (1) Policy Loss: 크로스 엔트로피 (또는 음의 로그 우도)
-        #    action_probs(타겟)와 policy_output(예측) 간 비교
-        policy_loss = -torch.sum(action_probs * torch.log(policy_output + 1e-7), dim=1).mean()
-
-        # (2) Value Loss: MSE
-        value_output = value_output.squeeze()  # shape: (B,)
-        value_loss = F.mse_loss(value_output, results)
-
-        loss = policy_loss + value_loss
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        model.losses[len(model.losses)].append(loss.item())
-        print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
+        
     return optimizer
 
 
@@ -396,7 +407,8 @@ def train(
     learning_rate=1e-3,
     capacity=2000,
     device=None, 
-    pretrained_model_path=None
+    pretrained_model_path=None,
+    save_model_path=None,
 ):
     model = AlphaGoZeroNet(board_size=board_size)
     optimizer_state_dict = None
@@ -414,39 +426,48 @@ def train(
     replay_buffer = ReplayBuffer(capacity=capacity, device=device)
 
     
+    try:
+        for it in range(num_iterations):
+            print(f"\n=== Iteration {it+1} / {num_iterations} ===")
 
-    for it in range(num_iterations):
-        print(f"\n=== Iteration {it+1} / {num_iterations} ===")
+            # 1) 자가 대국 진행 후 데이터 수집
+            for g in range(games_per_iteration):
+                # 초기 바둑판 상태(모두 빈칸), 흑 선공
+                empty_board = np.zeros((board_size, board_size), dtype=np.int32)
+                init_state = State(empty_board, current_player=1, previous_board=None)
 
-        # 1) 자가 대국 진행 후 데이터 수집
-        for g in range(games_per_iteration):
-            # 초기 바둑판 상태(모두 빈칸), 흑 선공
-            empty_board = np.zeros((board_size, board_size), dtype=np.int32)
-            init_state = State(empty_board, current_player=1, previous_board=None)
+                # 한 판 자가 대국
+                game_data = self_play(
+                    model,
+                    init_state, 
+                    num_simulations=num_simulations, 
+                    temperature=1.0
+                )
+                replay_buffer.store(game_data)
 
-            # 한 판 자가 대국
-            game_data = self_play(model, init_state, 
-                                  num_simulations=num_simulations, 
-                                  temperature=1.0)
-            replay_buffer.store(game_data)
+            # 2) 버퍼에서 샘플을 뽑아 모델 학습
+            print("Training...")
+            optimizer = train_model(
+                model, 
+                replay_buffer, 
+                batch_size=batch_size, 
+                epochs=epochs, 
+                learning_rate=learning_rate,
+                optimizer_state_dict=optimizer_state_dict
+            )
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt")
 
-        # 2) 버퍼에서 샘플을 뽑아 모델 학습
-        print("Training...")
-        optimizer = train_model(
-            model, 
-            replay_buffer, 
-            batch_size=batch_size, 
-            epochs=epochs, 
-            learning_rate=learning_rate,
-            optimizer_state_dict=optimizer_state_dict
-        )
+    if save_model_path is None:
+        save_model_path = f'models/cho_pha_go'
     torch.save(
         {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'losses': model.losses
         }, 
-        f'models/cho_pha_go_{board_size}x{board_size}.pt')
+        save_model_path + f'_{board_size}x{board_size}.pt'
+    )
     print("Model saved.")
 
 
