@@ -3,7 +3,7 @@ import pygame
 import torch
 import warnings
 from go.go_board import FastState as State
-from cho_pha_go_train import AlphaGoZeroNet
+from cho_pha_go_train import AlphaGoZeroNet, ReplayBuffer, train_model
 
 warnings.filterwarnings("ignore")
 
@@ -79,6 +79,7 @@ class InteractiveGo:
         text_surface = font.render(text, True, self.WHITE)
         text_rect = text_surface.get_rect(center=(x + width // 2, y + height // 2))
         self.screen.blit(text_surface, text_rect)
+        
 
     def is_button_pressed(self, pos, x, y, width, height):
         """pos가 버튼 범위(x, y, width, height) 내인지 체크"""
@@ -95,8 +96,12 @@ class InteractiveGo:
                 elif board[yy, xx] == -1:
                     self.draw_stone(xx, yy, self.WHITE)
 
-        # 버튼들 (예: Reset)
+        # reset 버튼
         self.draw_button("Reset", 10, self.screen_height - 50, 100, 40, self.GRAY)
+        # skip 버튼
+        self.draw_button("Skip", 120, self.screen_height - 50, 100, 40, self.GRAY)
+        # undo 버튼 
+        self.draw_button("Undo", 230, self.screen_height - 50, 100, 40, self.GRAY)
         pygame.display.flip()
 
     # ---------------------------
@@ -151,30 +156,38 @@ class InteractiveGo:
 
         pygame.quit()
 
-    # ---------------------------
-    # 사람 vs AI
-    # ---------------------------
-    def run_player_vs_ai(self, player_black=True, model_path=None, device="cpu"):
+        
+    def run_player_vs_ai(
+        self, 
+        player_black=True, 
+        model_path=None, 
+        device="cpu",
+    ):
         """
-        사람 vs AI 모드
-        Args:
-            player_black (bool): 사람이 흑인지 여부
-            model_path (str): AI 모델 경로
+        사람 vs AI 모드 + (옵션) 대국 데이터 학습에 활용.
+        사람이 두는 수 / AI가 두는 수를 모두 기록.
         """
+
         # 1) 모델 로드
         if model_path is None:
-            model_path = f"models/cho_pha_go_{self.board_size}x{self.board_size}.pt"
+            model_path = f"models/cho_pha_go"
         else:
-            model_path = f"{model_path}_{self.board_size}x{self.board_size}.pt"
+            model_path = f"{model_path}"
+        if model_path.endswith(f'_{self.board_size}x{self.board_size}.pt'):
+            pass
+        else:
+            model_path += f'_{self.board_size}x{self.board_size}.pt'
         agent = AlphaGoZeroNet(board_size=self.board_size)
-        agent.load_state_dict(torch.load(model_path)['model_state_dict'])
+        agent.to(device)
+        agent.load(model_path)
         agent.eval()
+        replay_buffer = ReplayBuffer(capacity=10000, device=device)
 
         # 2) 상태 초기화
         empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
-        game_state = State(board=empty_board, current_player=1)
+        game_state = State(board=empty_board, current_player=1, memorize_before=True)
 
-        # 플레이어 순서 결정
+        # 플레이어 순서 결정 (turn=1: 사람, -1:AI)
         if player_black:
             turn = 1  # 사람 = 흑
         else:
@@ -183,80 +196,159 @@ class InteractiveGo:
         running = True
         self.update_display(game_state)
 
+        # -----------------------------
+        # 저장용: (state_tensor, action_probs, None) 리스트
+        # 게임 종료 후 최종 결과(승/패/무승부)를 붙여서 replay_buffer에 넣음
+        # -----------------------------
+        data_this_game = []
+
         while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
+            try:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
 
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    mouse_pos = pygame.mouse.get_pos()
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        mouse_pos = pygame.mouse.get_pos()
 
-                    # 1) Reset 버튼 체크
-                    if self.is_button_pressed(mouse_pos, 10, self.screen_height - 50, 100, 40):
-                        empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
-                        game_state = State(empty_board, current_player=1)
-                        turn = 1 if player_black else -1
-                        self.update_display(game_state)
-                        continue
-
-                    # 2) 클릭 -> 좌표 변환
-                    board_x = (mouse_pos[0] - self.margin) // self.cell_size
-                    board_y = (mouse_pos[1] - self.margin) // self.cell_size
-
-                    # (A) 사람이 둘 차례
-                    if turn == 1:
-                        if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
-                            
-                            if game_state.is_valid_move(board_x, board_y):
-                                game_state = game_state.apply_action((board_x, board_y))
+                        # 1) Reset 버튼 체크
+                        if self.is_button_pressed(mouse_pos, 10, self.screen_height - 50, 100, 40):
+                            empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
+                            game_state = State(empty_board, current_player=1, memorize_before=True)
+                            turn = 1 if player_black else -1
+                            self.update_display(game_state)
+                            # Reset 시엔 이전 수 기록을 지워야 하나?
+                            data_this_game.clear()
+                            continue
+                        # Skip 버튼 체크
+                        elif self.is_button_pressed(mouse_pos, 120, self.screen_height - 50, 100, 40):
+                            if turn == 1:
+                                game_state.pass_count += 1
                                 turn = -turn
-                                self.update_display(game_state)
-
-                                # 종료?
+                                game_state.current_player = -game_state.current_player
                                 if game_state.is_terminal():
                                     winner = game_state.get_result()
+
                                     if winner == 1:
-                                        print("흑(1) 승리!")
+                                        print(f"흑(1) {'플레이어' if player_black else '조파고'} 승리!")
                                     elif winner == -1:
-                                        print("백(-1) 승리!")
+                                        print(f"백(-1) {'조파고' if player_black else '플레이어'} 승리!")
                                     else:
                                         print("무승부!")
+                                    final_data = []
+                                    
+                                    for (st, ap, _) in data_this_game:
+                                        final_data.append((st, ap, winner))
+                                        
+                                    if replay_buffer is not None:
+                                        replay_buffer.store(final_data)
+                                        
+                                    data_this_game.clear()
+                                    empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
+                                    game_state = State(empty_board, current_player=1, memorize_before=True)
+                                    turn = 1 if player_black else -1
+                                    self.update_display(game_state)
+
+                        # Undo 버튼 체크
+                        elif self.is_button_pressed(mouse_pos, 230, self.screen_height - 50, 100, 40):
+                            if len(data_this_game) > 0:
+                                data_this_game.pop()
+                                game_state = game_state.last
+                                turn = -turn
+                                self.update_display(game_state)
                                 continue
                             else:
-                                print("유효하지 않은 수입니다.")
-                                
-                    # (B) AI가 둘 차례
-                    else:
-                        # (간단 예시) 모델에 forward → policy argmax로 결정
-                        with torch.no_grad():
-                            state_tensor = game_state.to_tensor()    # (17, H, W)
-                            state_tensor = state_tensor.unsqueeze(0) # (1, 17, H, W)
-                            policy, value = agent(state_tensor)      # policy shape = (1, board_size^2)
+                                print("이전 수가 없습니다.")
+                                continue
+                                    
+                        # 2) 바둑판 클릭 좌표
+                        board_x = (mouse_pos[0] - self.margin) // self.cell_size
+                        board_y = (mouse_pos[1] - self.margin) // self.cell_size
 
-                        policy = policy.squeeze(0).numpy()  # (board_size^2,)
-                        # 가장 확률 높은 곳부터 valid move 찾기
-                        while True:
-                            action_idx = np.argmax(policy)
-                            policy[action_idx] = -1  # 이미 사용한 곳 제외
-                            ax = action_idx % self.board_size
-                            ay = action_idx // self.board_size
+                        # (A) 사람이 둘 차례
+                        if turn == 1:
+                            if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
+                                if game_state.is_valid_move(board_x, board_y):
+                                    # 1) 현재 상태 텐서
+                                    state_tensor = game_state.to_tensor()
 
-                            if game_state.is_valid_move(ax, ay):
-                                game_state = game_state.apply_action((ax, ay))
-                                turn = -turn
-                                self.update_display(game_state)
+                                    # 2) 사람이 둔 수 → one-hot
+                                    board_sz = self.board_size
+                                    human_probs = np.zeros((board_sz * board_sz,), dtype=np.float32)
+                                    idx = board_y * board_sz + board_x
+                                    human_probs[idx] = 1.0
 
-                                if game_state.is_terminal():
-                                    winner = game_state.get_result()
-                                    if winner == 1:
-                                        print("흑(1) 승리!")
-                                    elif winner == -1:
-                                        print("백(-1) 승리!")
-                                    else:
-                                        print("무승부!")
+                                    # 3) 임시로 (state, one-hot, None) 저장
+                                    data_this_game.append((state_tensor.squeeze(0), human_probs, None))
+
+                                    # 착수
+                                    game_state = game_state.apply_action((board_x, board_y))
+                                    turn = -turn
+                                    self.update_display(game_state)
+
+                                    # 종료 체크
+                                    if game_state.is_terminal():
+                                        winner = game_state.get_result()
+                                        # 데이터에 결과를 부여
+                                        final_data = []
+                                        for (st, ap, _) in data_this_game:
+                                            final_data.append((st, ap, winner))
+                                        # 버퍼에 저장
+                                        if replay_buffer is not None:
+                                            replay_buffer.store(final_data)
+                                        data_this_game.clear()
+                                else:
+                                    print("유효하지 않은 수입니다.")
+                        
+                        # (B) AI가 둘 차례
+                        else:
+                            
+                            agent.eval()
+                            with torch.no_grad():
+                                state_tensor = game_state.to_tensor().unsqueeze(0)
+                                tensor, policy_np = agent(state_tensor)
+
+                            move = agent.make_move(game_state)
+                            
+                            # when ai skips & game is valid
+                            if move is not None and not game_state.is_valid_move(*move):
+                                running = False
                                 break
 
-            pygame.display.flip()
+                            # (state_tensor, policy 전체, None) 저장
+                            data_this_game.append((state_tensor.squeeze(0).squeeze(0), policy_np, None))
+
+                            # 착수
+
+                            game_state = game_state.apply_action(move)
+                            turn = -turn
+                            self.update_display(game_state)
+
+                            if game_state.is_terminal():
+                                winner = game_state.get_result()
+                                # 전체 데이터에 결과 부여
+                                final_data = []
+                                for (st, ap, _) in data_this_game:
+                                    final_data.append((st, ap, winner))
+                                if replay_buffer is not None:
+                                    replay_buffer.store(final_data)
+                                data_this_game.clear()
+                            
+            except KeyboardInterrupt:
+                running = False
+                break
+            
+        train_model(
+            model=agent,
+            replay_buffer=replay_buffer,
+            batch_size=1,
+            epochs=10,
+        )
+        agent.save(
+            '/'.join(model_path.split('/')[:-1] + ['vs_human_trained_' + model_path.split('/')[-1]]) if 'vs_human' not in model_path else model_path
+        )
+        
+        pygame.display.flip()
 
         pygame.quit()
 

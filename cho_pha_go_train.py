@@ -1,5 +1,5 @@
 import os
-import pickle
+import multiprocessing as mp
 import numpy as np
 from collections import deque, defaultdict
 import torch
@@ -21,7 +21,7 @@ class AlphaGoZeroNet(nn.Module):
         self.device = None
         self.board_size = board_size
         self.losses = defaultdict(list)
-
+        self.optimizer = None
         # 네트워크 크기 동적 조정
         if board_size <= 9:
             self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
@@ -107,6 +107,33 @@ class AlphaGoZeroNet(nn.Module):
         # 기본값
         return torch.device("cpu")
     
+    def save(
+        self, 
+        path, 
+        # optimizer
+    ): 
+        tail = f'{self.board_size}x{self.board_size}' in path
+        path = path + f'_{self.board_size}x{self.board_size}.pt' if not tail else path
+        torch.save(
+            {
+                'model_state_dict': self.state_dict(),
+                # 'optimizer_state_dict': self.optimizer.state_dict(),
+                'losses': self.losses
+            }, 
+            path
+        )
+        print(f"Model saved to {path}.")
+    
+    def load(
+        self,
+        path,
+        # optimizer
+    ):
+        checkpoint = torch.load(path, map_location=self.device)
+        self.load_state_dict(checkpoint['model_state_dict'])
+        # self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.losses = checkpoint['losses']
+        print(f"Model loaded from {path}.")
 
     def mcts_search(self, state: State, num_simulations=800):
         """
@@ -172,6 +199,13 @@ class AlphaGoZeroNet(nn.Module):
                 node = node.parent
 
         return root
+    
+    def make_move(self, state: State, temperature=1.0):
+        """
+        현재 상태에서 MCTS를 이용해 행동을 선택
+        """
+        root = self.mcts_search(state, num_simulations=800)
+        return root.best_action(temperature=temperature)
 
 
 
@@ -464,6 +498,7 @@ def _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
 @timeit
 def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, optimizer_state_dict=None):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    model.optimizer = optimizer
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
 
@@ -473,7 +508,7 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
         if not _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
             break
         
-    return optimizer
+    # return optimizer
 
 def play_self_game(model, num_simulations=800, board_size=19):
     # 초기 바둑판 상태(모두 빈칸), 흑 선공
@@ -488,7 +523,6 @@ def play_self_game(model, num_simulations=800, board_size=19):
         temperature=1.0
     )
     return game_data
-import multiprocessing as mp
 
 #####################################
 # 7. 실제 학습 루프
@@ -511,10 +545,7 @@ def train(
     optimizer_state_dict = None
     if pretrained_model_path is not None:
         if os.path.exists(pretrained_model_path):
-            model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
-            optimizer_state_dict = torch.load(pretrained_model_path)['optimizer_state_dict']
-            model.losses = torch.load(pretrained_model_path)['losses']
-            print(f"Pretrained model loaded from {pretrained_model_path}")
+            model.load(pretrained_model_path)
     device = torch.device(device)
     model = model.to(device)
     model.to(torch.float32)
@@ -551,10 +582,11 @@ def train(
                     processes.popleft()
                 
             replay_buffer.store(game_data)
+            
             # 2) 버퍼에서 샘플을 뽑아 모델 학습
             model.to(device)
             print("Training...")
-            optimizer = train_model(
+            train_model(
                 model, 
                 replay_buffer, 
                 batch_size=batch_size, 
@@ -572,15 +604,7 @@ def train(
     if save_model_path is None:
         save_model_path = f'models/cho_pha_go'
     model.to('cpu')
-    torch.save(
-        {
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'losses': model.losses
-        }, 
-        save_model_path + f'_{board_size}x{board_size}.pt'
-    )
-    print("Model saved.")
+    model.save(save_model_path)
 
 
 if __name__ == "__main__":

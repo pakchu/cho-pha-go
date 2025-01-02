@@ -136,6 +136,8 @@ class FastState:
         player_1_dead_stones: int = 0,
         player_minus_1_dead_stones: int = 0,
         history: list = None,
+        memorize_before: bool = False,
+        last = None,
     ):
         self.board = board
         self.current_player = current_player
@@ -143,6 +145,8 @@ class FastState:
         self.pass_count = pass_count
         self.player_1_dead_stones = player_1_dead_stones
         self.player_minus_1_dead_stones = player_minus_1_dead_stones
+        self.memorize_before = memorize_before
+        self.last = last
         if history is None:
             self.history = []
         else:
@@ -156,7 +160,9 @@ class FastState:
             pass_count=self.pass_count,
             player_1_dead_stones=self.player_1_dead_stones,
             player_minus_1_dead_stones=self.player_minus_1_dead_stones,
-            history=self.history[:]  # shallow copy of list
+            history=self.history[:],  # shallow copy of list
+            memorize_before=self.memorize_before,
+            last = self.last.copy() if self.last is not None else None,
         )
 
     def is_valid_move(self, x, y):
@@ -187,7 +193,8 @@ class FastState:
             pass_count=0,
             player_1_dead_stones=self.player_1_dead_stones,
             player_minus_1_dead_stones=self.player_minus_1_dead_stones,
-            history=self.history[:]
+            history=self.history[:],
+            memorize_before=self.memorize_before,
         )
         # 착수 후 상대 돌 제거
         # -> numba 함수로 호출
@@ -201,6 +208,8 @@ class FastState:
         # 다음 플레이어
         new_state.current_player = -self.current_player
         new_state.history.append((x, y, self.current_player))
+        if self.memorize_before:
+            new_state.last = self.copy()
         return new_state
 
     def get_legal_actions(self):

@@ -1,10 +1,6 @@
 import argparse
 import os
-import numpy as np
-import torch
 
-import cho_pha_go_train
-import interactive_go
 
 
 def main():
@@ -61,6 +57,7 @@ def main():
     # --------------------------------------------------------
     # train 옵션을 넣었거나, 모델이 없으면 학습을 진행합니다.
     if args.train or f'cho_pha_go_{args.board_size}x{args.board_size}.pt' not in os.listdir('models'):
+        import cho_pha_go_train
         # cho_pha_go_train.train에 필요한 인자를 넘겨줍니다.
         cho_pha_go_train.train(
             board_size=args.board_size,
@@ -80,6 +77,7 @@ def main():
     # 2) 플레이(player vs AI)
     # --------------------------------------------------------
     if args.play:
+        import interactive_go
         # 플레이 세팅
         # interactive_go 모듈에서 board_size 등을 받을 수 있게 구현했다면 넘겨줍니다
         interactive_go.InteractiveGo(
