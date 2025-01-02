@@ -21,24 +21,39 @@ class AlphaGoZeroNet(nn.Module):
         self.device = None
         self.board_size = board_size
         self.losses = defaultdict(list)
+
+        # 네트워크 크기 동적 조정
+        if board_size <= 9:
+            self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
+            self.num_residual_blocks = 3  # Residual Block 개수 축소
+        elif board_size <= 13:
+            self.num_filters = 128
+            self.num_residual_blocks = 8
+        else:
+            self.num_filters = 256  # 기본 크기
+            self.num_residual_blocks = 19
+
         # 첫 Conv
-        self.conv1 = nn.Conv2d(17, 256, kernel_size=3, padding=1)
-        # Residual Block 19개 (예시)
+        self.conv1 = nn.Conv2d(17, self.num_filters, kernel_size=3, padding=1)
+
+        # Residual Block 정의
         self.residual_blocks = nn.ModuleList(
-            [self._build_residual_block() for _ in range(19)]
+            [self._build_residual_block() for _ in range(self.num_residual_blocks)]
         )
+
         # Policy Head
         self.policy_head = nn.Sequential(
-            nn.Conv2d(256, 2, kernel_size=1),
+            nn.Conv2d(self.num_filters, 2, kernel_size=1),
             nn.BatchNorm2d(2),
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(board_size * board_size * 2, board_size * board_size),
             nn.Softmax(dim=1)
         )
+
         # Value Head
         self.value_head = nn.Sequential(
-            nn.Conv2d(256, 1, kernel_size=1),
+            nn.Conv2d(self.num_filters, 1, kernel_size=1),
             nn.BatchNorm2d(1),
             nn.ReLU(),
             nn.Flatten(),
@@ -48,19 +63,38 @@ class AlphaGoZeroNet(nn.Module):
             nn.Tanh()
         )
 
+    def _build_residual_block(self):
+        """
+        Residual Block 정의
+        """
+        return nn.Sequential(
+            nn.Conv2d(self.num_filters, self.num_filters, kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.num_filters),
+            nn.ReLU(),
+            nn.Conv2d(self.num_filters, self.num_filters, kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.num_filters)
+        )
+
+    def forward(self, x):
+        """
+        모델 순전파
+        """
+        x = F.relu(self.conv1(x))
+        for block in self.residual_blocks:
+            skip = x
+            x = block(x)
+            x = F.relu(x + skip)
+
+        policy = self.policy_head(x)
+        value = self.value_head(x)
+        return policy, value
+
+        
     def to(self, *args, **kwargs):
         self = super().to(*args, **kwargs)
         self.device = self.get_device()
         return self
     
-    def _build_residual_block(self):
-        return nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256)
-        )
     def get_device(self):
         # 파라미터 확인
         param = next(self.parameters(), None)
@@ -73,19 +107,6 @@ class AlphaGoZeroNet(nn.Module):
         # 기본값
         return torch.device("cpu")
     
-    def forward(self, x):
-        # 첫 Conv
-        x = F.relu(self.conv1(x))
-        # Residual Block을 순차적으로 적용
-        for block in self.residual_blocks:
-            skip = x
-            x = block(x)
-            x = F.relu(x + skip)
-
-        # Policy, Value 헤드
-        policy = self.policy_head(x)
-        value = self.value_head(x)
-        return policy, value
 
     def mcts_search(self, state: State, num_simulations=800):
         """
@@ -378,6 +399,7 @@ def _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
     print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
     return True
 
+@timeit
 def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, optimizer_state_dict=None):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     if optimizer_state_dict is not None:

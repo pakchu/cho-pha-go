@@ -164,6 +164,8 @@ class InteractiveGo:
         # 1) 모델 로드
         if model_path is None:
             model_path = f"models/cho_pha_go_{self.board_size}x{self.board_size}.pt"
+        else:
+            model_path = f"{model_path}_{self.board_size}x{self.board_size}.pt"
         agent = AlphaGoZeroNet(board_size=self.board_size)
         agent.load_state_dict(torch.load(model_path)['model_state_dict'])
         agent.eval()

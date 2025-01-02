@@ -2,3 +2,4 @@
 **/__pycache__/
 **/*test*
 *.pt
+!models/cho_pha_go_5x5.pt
