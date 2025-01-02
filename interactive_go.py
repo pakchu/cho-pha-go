@@ -2,7 +2,7 @@ import numpy as np
 import pygame
 import torch
 import warnings
-from go.go_board import State
+from go.go_board import FastState as State
 from cho_pha_go_train import AlphaGoZeroNet
 
 warnings.filterwarnings("ignore")
@@ -206,6 +206,7 @@ class InteractiveGo:
                     # (A) 사람이 둘 차례
                     if turn == 1:
                         if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
+                            
                             if game_state.is_valid_move(board_x, board_y):
                                 game_state = game_state.apply_action((board_x, board_y))
                                 turn = -turn
@@ -223,7 +224,7 @@ class InteractiveGo:
                                 continue
                             else:
                                 print("유효하지 않은 수입니다.")
-
+                                
                     # (B) AI가 둘 차례
                     else:
                         # (간단 예시) 모델에 forward → policy argmax로 결정

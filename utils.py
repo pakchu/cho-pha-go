@@ -6,6 +6,6 @@ def timeit(method):
         ts = datetime.datetime.now()
         result = method(*args, **kw)
         te = datetime.datetime.now()
-        print(f'Method: {method.__name__}, Time: {te - ts}')
+        print(f'Method: {method.__name__}, From: {ts}, To: {te}, Time: {te - ts}')
         return result
     return timed

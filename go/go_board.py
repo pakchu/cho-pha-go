@@ -1,10 +1,132 @@
-import numpy as np
-import torch
+import numba, torch, numpy as np
 
+@numba.njit
+def get_neighbors_numba(x, y, w, h):
+    """
+    (x, y)의 상하좌우 좌표를 반환. 
+    """
+    neighbors = []
+    if x > 0:
+        neighbors.append((x - 1, y))
+    if x < w - 1:
+        neighbors.append((x + 1, y))
+    if y > 0:
+        neighbors.append((x, y - 1))
+    if y < h - 1:
+        neighbors.append((x, y + 1))
+    return neighbors
 
-# TODO: 속도 개선을 위해 numpy array를 사용하고, 필요한 경우에만 PyTorch 텐서로 변환 또는 numba.jit 사용
+@numba.njit
+def get_group_numba(board, start_x, start_y):
+    """
+    (start_x, start_y)에 있는 돌( board[start_y,start_x] )과 
+    연결된 그룹(동일 색, 상하좌우 연결)을 BFS/스택 방식으로 추적.
+    return: list of (x, y)
+    """
+    color = board[start_y, start_x]
+    stack = [(start_x, start_y)]
+    visited = []
+    visited_set = set()  # numba가 set을 완벽 지원X -> 대안은 boolean array or dict
 
-class State:
+    while len(stack) > 0:
+        x, y = stack.pop()
+        if (x, y) in visited_set:
+            continue
+        visited_set.add((x, y))
+        visited.append((x, y))
+
+        # 이웃 탐색
+        neighs = get_neighbors_numba(x, y, board.shape[1], board.shape[0])
+        for (nx, ny) in neighs:
+            if board[ny, nx] == color and (nx, ny) not in visited_set:
+                stack.append((nx, ny))
+
+    return visited
+
+@numba.njit
+def get_liberties_numba(board, group):
+    """
+    그룹(group)에 대해 공배(자유도) 좌표 세트를 구함.
+    group: list of (x, y)
+    return: list of (x, y) 공배
+    """
+    liberties = []
+    lib_set = set()  # numba에서 set 사용은 제한적 -> 대안으로 dict나 list 중복체크
+    for (gx, gy) in group:
+        neighs = get_neighbors_numba(gx, gy, board.shape[1], board.shape[0])
+        for (nx, ny) in neighs:
+            if board[ny, nx] == 0:
+                if (nx, ny) not in lib_set:
+                    lib_set.add((nx, ny))
+                    liberties.append((nx, ny))
+    return liberties
+
+@numba.njit
+def remove_dead_stones_numba(board, x, y, current_player):
+    """
+    (x, y)에 착수 후, 주변 상대 돌 중 공배가 0인 그룹 제거.
+    board: 2D numpy array (흑=1, 백=-1, 빈=0)
+    current_player: 1 or -1
+    return: (new_board, dead_count)  -> 제거된 돌 수
+    """
+    # board는 copy된 것을 전제로 수정
+    h, w = board.shape
+    opponent = -current_player
+    dead_count = 0
+
+    # (x, y) 주변 좌표
+    neighs = get_neighbors_numba(x, y, w, h)
+    for (nx, ny) in neighs:
+        if board[ny, nx] == opponent:
+            group = get_group_numba(board, nx, ny)
+            libs = get_liberties_numba(board, group)
+            if len(libs) == 0:
+                # 캡처
+                for (gx, gy) in group:
+                    board[gy, gx] = 0
+                dead_count += len(group)
+    return board, dead_count
+
+@numba.njit
+def is_valid_move_numba(board, prev_board, x, y, current_player):
+    """
+    착수 가능 여부 확인 (자충수/패규칙 등)
+    board: 현재 board (수 놓기 전)
+    prev_board: 직전 착수 직후 보드
+    """
+    if prev_board is None:
+        prev_board = np.zeros_like(board)
+        
+    h, w = board.shape
+    # 1) 범위 체크
+    if not (0 <= x < w and 0 <= y < h):
+        return False
+    # 2) 이미 돌이 있는 곳
+    if board[y, x] != 0:
+        return False
+
+    # 3) 임시로 돌을 놓음
+    temp_board = board.copy()
+    temp_board[y, x] = current_player
+
+    # 4) remove_dead_stones
+    temp_board, dead_count = remove_dead_stones_numba(temp_board, x, y, current_player)
+
+    # 5) 착수한 돌의 그룹 + 공배 체크
+    group = get_group_numba(temp_board, x, y)
+    libs = get_liberties_numba(temp_board, group)
+    if len(libs) == 0:
+        # 자충수
+        return False
+
+    # 6) 패 규칙: temp_board == prev_board
+    #    (numba에서 array_equal을 직접 구현 or np.array_equal 대체)
+    if prev_board is not None and prev_board.shape == board.shape:
+        return ~np.all(temp_board == prev_board)
+    else:
+        raise ValueError("Invalid prev_board shape")
+
+class FastState:
     def __init__(
         self,
         board: np.ndarray,
@@ -15,17 +137,10 @@ class State:
         player_minus_1_dead_stones: int = 0,
         history: list = None,
     ):
-        """
-        Args:
-            board: 2D numpy array (흑:1, 백:-1, 빈칸:0)
-            current_player: 1(흑) 혹은 -1(백)
-            previous_board: 직전 착수 직후의 바둑판(패 규칙 확인 용)
-            pass_count: 직전에 연속된 패스 횟수(0, 1, ...).
-        """
         self.board = board
         self.current_player = current_player
         self.previous_board = previous_board
-        self.pass_count = pass_count  # 연속 두 번 패스되면 종료로 간주
+        self.pass_count = pass_count
         self.player_1_dead_stones = player_1_dead_stones
         self.player_minus_1_dead_stones = player_minus_1_dead_stones
         if history is None:
@@ -34,117 +149,28 @@ class State:
             self.history = history
 
     def copy(self):
-        """딥카피 or 얕은 카피(필요에 맞게)."""
-        return State(
+        return FastState(
             board=self.board.copy(),
             current_player=self.current_player,
             previous_board=self.previous_board.copy() if self.previous_board is not None else None,
-            pass_count=self.pass_count
+            pass_count=self.pass_count,
+            player_1_dead_stones=self.player_1_dead_stones,
+            player_minus_1_dead_stones=self.player_minus_1_dead_stones,
+            history=self.history[:]  # shallow copy of list
         )
 
-    def get_neighbors(self, x, y):
-        """(x, y)의 상하좌우 좌표"""
-        neighbors = []
-        if x > 0:
-            neighbors.append((x - 1, y))
-        if x < self.board.shape[1] - 1:
-            neighbors.append((x + 1, y))
-        if y > 0:
-            neighbors.append((x, y - 1))
-        if y < self.board.shape[0] - 1:
-            neighbors.append((x, y + 1))
-        return neighbors
-
-    def get_group(self, x, y, visited=None):
-        """
-        (x, y)에 있는 돌과 연결된 그룹(동일 색, 상하좌우 연결).
-        return: {(x1,y1), (x2,y2), ...} 형태의 set
-        """
-        
-        # dfs로 구현
-        if visited is None:
-            visited = set()
-        if (x, y) in visited:
-            return visited
-        visited.add((x, y))
-
-        color = self.board[y][x]
-        for (nx, ny) in self.get_neighbors(x, y):
-            if self.board[ny][nx] == color:
-                self.get_group(nx, ny, visited)
-        return visited
-
-    def get_liberties(self, group):
-        """해당 그룹의 공배(자유도) 집합을 반환"""
-        liberties = set()
-        for (x, y) in group:
-            for (nx, ny) in self.get_neighbors(x, y):
-                if self.board[ny][nx] == 0:
-                    liberties.add((nx, ny))
-        return liberties
-
-    def remove_dead_stones(self, x, y):
-        """
-        (x, y)에 착수 후 주변 상대 돌들 중 자유도가 0인 그룹을 제거.
-        """
-        opponent = -self.current_player
-        neighbors = self.get_neighbors(x, y)
-        for (nx, ny) in neighbors:
-            if self.board[ny][nx] == opponent:
-                group = self.get_group(nx, ny)
-                libs = self.get_liberties(group)
-                if len(libs) == 0:
-                    # 캡처(제거)
-                    for (gx, gy) in group:
-                        self.board[gy][gx] = 0
-                    if opponent == 1:
-                        self.player_1_dead_stones += len(group)
-                    else:
-                        self.player_minus_1_dead_stones += len(group)
-
     def is_valid_move(self, x, y):
-        """(x, y)에 착수 가능 여부 확인"""
-        # 범위 밖 or 이미 돌이 있음
-        if not (0 <= x < self.board.shape[1] and 0 <= y < self.board.shape[0]):
-            return False
-        if self.board[y][x] != 0:
-            return False
-
-        # 임시로 돌을 두어 본다.
-        temp_board = self.board.copy()
-        temp_board[y][x] = self.current_player
-
-        # 착수 후 상대 돌 캡처, 돌 제거 전까진 current_player 유지
-        test_state = State(temp_board, self.current_player, previous_board=self.board)
-        test_state.remove_dead_stones(x, y)
-
-        # 착수한 돌(그룹)의 자유도 확인
-        group = test_state.get_group(x, y)
-        libs = test_state.get_liberties(group)
-        if len(libs) == 0:
-            # 내 돌이 자충수 상태 -> 착수 불가(단, 착수와 동시에 상대 돌이 캡처되는 경우 아니면)
-            # remove_dead_stones()가 이미 상대 돌은 제거했음
-            return False
-
-        # 패(ko) 규칙: 착수 후의 보드가 previous_board와 동일하면 안 됨
-        if self.previous_board is not None and np.array_equal(test_state.board, self.previous_board):
-            return False
-
-        return True
+        # Numba 함수 호출
+        prev_board = self.previous_board if self.previous_board is not None else None
+        return is_valid_move_numba(self.board, prev_board, x, y, self.current_player)
 
     def apply_action(self, action):
-        """
-        action: (x, y) or None(패스)
-        """
-        # 패스 처리
         if action is None:
-            # 다음 상태로 넘어감(pass_count+1)
-            new_state = State(
-                board=self.board.copy(),
-                current_player=-self.current_player,
-                previous_board=self.board.copy(),
-                pass_count=self.pass_count + 1
-            )
+            # 패스
+            new_state = self.copy()
+            new_state.previous_board = self.board.copy()
+            new_state.current_player = -self.current_player
+            new_state.pass_count += 1
             return new_state
 
         (x, y) = action
@@ -152,56 +178,51 @@ class State:
             raise ValueError(f"Invalid move at ({x}, {y})")
 
         new_board = self.board.copy()
-        new_board[y][x] = self.current_player
-        
-        # 새 상태 생성, 상대 돌 제거 전까진 current_player 유지
-        new_state = State(
+        new_board[y, x] = self.current_player
+
+        new_state = FastState(
             board=new_board,
             current_player=self.current_player,
             previous_board=self.board.copy(),
-            pass_count=0,  # 착수하면 pass_count 리셋
+            pass_count=0,
             player_1_dead_stones=self.player_1_dead_stones,
             player_minus_1_dead_stones=self.player_minus_1_dead_stones,
-            history=self.history
+            history=self.history[:]
         )
         # 착수 후 상대 돌 제거
-        new_state.remove_dead_stones(x, y)
-        # 다음 플레이어로 변경
+        # -> numba 함수로 호출
+        nb_board, dead_count = remove_dead_stones_numba(new_board, x, y, self.current_player)
+        new_state.board = nb_board
+        if -self.current_player == 1:
+            new_state.player_1_dead_stones += dead_count
+        else:
+            new_state.player_minus_1_dead_stones += dead_count
+
+        # 다음 플레이어
         new_state.current_player = -self.current_player
-        new_history = self.board.copy()
-        new_history[new_history == -self.current_player] = 0
-        new_state.history.append(new_history)
+        new_state.history.append((x, y, self.current_player))
         return new_state
 
     def get_legal_actions(self):
-        """모든 합법착수 + (옵션) 패스도 포함"""
         actions = []
         h, w = self.board.shape
+        prev_board = self.previous_board if self.previous_board is not None else None
         for yy in range(h):
             for xx in range(w):
-                if self.is_valid_move(xx, yy):
+                if is_valid_move_numba(self.board, prev_board, xx, yy, self.current_player):
                     actions.append((xx, yy))
-        # 패스도 가능하다고 가정하면, actions.append(None) 추가
-        actions.append(None)  # 패스
+        # 패스
+        actions.append(None)
         return actions
 
     def is_terminal(self):
-        """
-        1) 연속 두 번 패스(pass_count >= 2)
-        2) 또는 합법착수가 전혀 없는 경우(옵션)
-        """
         if self.pass_count >= 2:
             return True
-
-        # 착수할 곳이 아예 없으면(= 전부 invalid이거나 돌이 가득)
-        # 굳이 pass를 기다리지 않고 종료 가능하도록(옵션)
-        if len(self.get_legal_actions()) == 1:
-            # get_legal_actions()에서 None(패스)만 있는 상황이라면
+        if len(self.get_legal_actions()) == 1:  # only None
             return True
         return False
 
     def get_result(self):
-        """돌 개수로 승패 비교(단순화)"""
         black_stones = np.sum(self.board == 1) - self.player_1_dead_stones
         white_stones = np.sum(self.board == -1) - self.player_minus_1_dead_stones
         if black_stones > white_stones:
@@ -210,15 +231,15 @@ class State:
             return -1
         else:
             return 0
-        
+
     def to_tensor(self) -> torch.Tensor:
         """
         총 17채널 (C=17)짜리 numpy array를 만든 뒤, (1, 17, H, W) 형태의 PyTorch 텐서로 반환.
         
         구체적 구성:
         - channel 0: 현재 보드 (흑=1, 백=-1, 빈=0)
-        - channel 1~8: 최근 8번의 history 보드 (가장 최근이 channel 1, 그 전이 channel 2, ...)
-        - channel 9~15: (필요하다면 다른 정보, 여기서는 전부 0)
+        - channel 1~15: 최근 7, 8번의 history 보드 (가장 최근이 channel 1, 그 전이 channel 2, ...)
+
         - channel 16: 현재 플레이어 (흑 차례=1.0, 백 차례=0.0) 
         """
         h, w = self.board.shape
@@ -232,14 +253,14 @@ class State:
         # (2) 최근 8개 history 보드 채널 (channel 1~8)
         #     history[-1] = 가장 최근 상태
         #     history[-2] = 그 이전 ...
-        max_moves = 8
+        max_moves = 15
         num_history = len(self.history)
         for i in range(max_moves):
-            index = num_history - 1 - i  # 뒤에서부터 i번째
-            if index < 0:
-                break  # history가 부족하면 중단
-            # history에 저장된 보드 상태를 channel (i+1)에 복사
-            tensor[i + 1, :, :] = self.history[index]
+            
+            (x, y, c) = self.history[num_history - i - 1] if i < num_history else (0, 0, 0)
+                
+            tensor[i+1, y, x] = c
+            
 
         # (3) channel 9~15는 사용 안 함 => 이미 0으로 초기화되어 있으므로 그대로 둠
         #     필요하면 여기에 다른 정보(패 정보, 사석 정보 등)를 넣을 수 있음.
@@ -252,23 +273,7 @@ class State:
             tensor[16, :, :] = 1.0
         else:
             # 백 차례
-            tensor[16, :, :] = 0.0
+            tensor[16, :, :] = -1.0
 
         # 마지막으로 (17, H, W)를 (1, 17, H, W)로 만들어 리턴
         return torch.tensor(tensor, dtype=torch.float32)
-
-            
-if __name__ == "__main__":
-    board = [[0, 0,  0,  0,  0],
-            [0,  0,  0,  0,  0],
-            [ 0,  0,  0,  0,  0],
-            [ 0,  0,  0,  0,  0],
-            [ 0,  0,  0,  0,  0]]
-    board = np.array(board)
-    game_state = State(board=board, current_player=1)
-    game_state=game_state.apply_action((0, 0))
-    game_state=game_state.apply_action((1, 0))
-    game_state=game_state.apply_action((1, 1))
-    # breakpoint()
-    game_state=game_state.apply_action((0, 1))
-    breakpoint()
