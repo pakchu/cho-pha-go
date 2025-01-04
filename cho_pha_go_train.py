@@ -204,6 +204,7 @@ class AlphaGoZeroNet(nn.Module):
         """
         현재 상태에서 MCTS를 이용해 행동을 선택
         """
+        self.eval()
         root = self.mcts_search(state, num_simulations=800)
         return root.best_action(temperature=temperature)
 
@@ -468,7 +469,7 @@ class ReplayBuffer:
 # 6. 모델 학습 함수
 #####################################
 @timeit
-def _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
+def _train(model: AlphaGoZeroNet, replay_buffer, optimizer, batch_size, epoch, epochs):
     states, action_probs, results = replay_buffer.sample(batch_size)
     if states is None:
         print("Not enough samples in replay buffer.")
@@ -501,7 +502,7 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
     model.optimizer = optimizer
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
-
+    model.train()
     # iteration 마다 loss 들을 저장하는 리스트
     model.losses[len(model.losses)+1] = []
     for epoch in range(epochs):

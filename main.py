@@ -1,6 +1,7 @@
 import argparse
 import os
-
+import warnings
+warnings.filterwarnings("ignore")
 
 
 def main():
@@ -46,11 +47,17 @@ def main():
 
     args = parser.parse_args()
     
-    if args.pretrained_model_path is not None and not args.pretrained_model_path.startswith('models/'):
-        args.pretrained_model_path = f'models/{args.pretrained_model_path}'
+    if args.pretrained_model_path is not None:
+        if not args.pretrained_model_path.startswith('models/'):
+            args.pretrained_model_path = f'models/{args.pretrained_model_path}'
+        if not args.pretrained_model_path.endswith(f'{args.board_size}x{args.board_size}.pt'):
+            args.pretrained_model_path += f'_{args.board_size}x{args.board_size}.pt'
         
-    if args.save_path is not None and not args.save_path.startswith('models/'):
-        args.save_path = f'models/{args.save_path}'
+    if args.save_path is not None:
+        if not args.save_path.startswith('models/'):
+            args.save_path = f'models/{args.save_path}'
+        if not args.save_path.endswith(f'{args.board_size}x{args.board_size}.pt'):
+            args.save_path += f'_{args.board_size}x{args.board_size}.pt'
         
     # --------------------------------------------------------
     # 1) 학습(train)
@@ -99,4 +106,5 @@ if __name__ == "__main__":
 """
 python main.py --train --board-size 5 --num-iterations 30 --games-per-iteration 3 --num-simulations 100 --batch-size 16 --epochs 100 --capacity 100 --device mps
 python main.py --train --board-size 5 --num-iterations 50 --games-per-iteration 3 --num-simulations 100 --batch-size 16 --epochs 100 --capacity 1000 --device mps -s super_cho_pha_go
+python main.py --train --board-size 5 --num-iterations 200 --games-per-iteration 4  --num-simulations 400 --batch-size 16 --epochs 200 --capacity 1000 --device cpu --pretrained-model-path cho_pha_go
 """
