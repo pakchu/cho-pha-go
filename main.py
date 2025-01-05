@@ -1,5 +1,6 @@
 import argparse
 import os
+from typing import Optional
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -39,11 +40,12 @@ def main():
                         help="Learning rate for training (default=0.001)")
     parser.add_argument("--save-path", "-s", type=str, default=None,
                         help="Path to save the trained model.")
+    parser.add_argument("--early-stopping", default=None, type=Optional[int],
+                        help="Number of iterations to wait for improvement before early stopping.")
 
     # 모델 경로
     parser.add_argument("--pretrained-model-path", "-p", type=str, default=None,
                         help="Path to a pretrained model (.pt).")
-
 
     args = parser.parse_args()
     
@@ -73,6 +75,7 @@ def main():
             num_simulations=args.num_simulations,
             batch_size=args.batch_size,
             epochs=args.epochs,
+            earlystopping=args.early_stopping,
             learning_rate=args.learning_rate,
             capacity=args.capacity,
             device=args.device,

@@ -1,3 +1,4 @@
+import copy
 import os
 import multiprocessing as mp
 import numpy as np
@@ -106,6 +107,16 @@ class AlphaGoZeroNet(nn.Module):
             return buffer.device
         # 기본값
         return torch.device("cpu")
+
+    def copy(self):
+        """
+        모델 복사
+        """
+        model = AlphaGoZeroNet(board_size=self.board_size)
+        model.load_state_dict(self.state_dict())
+        model.device = self.device
+        model.losses = copy.copy(self.losses)
+        return model
     
     def save(
         self, 
@@ -276,8 +287,11 @@ class MCTSNode:
             visits = visits ** (1.0 / temperature)
             total = np.sum(visits)
             probs = visits / total
+            probs = probs.reshape(-1)
             actions = list(self.children.keys())
-            return np.random.choice(actions, p=probs)
+
+            return actions[np.random.choice(np.arange(len(actions)), p=probs.tolist())]
+
 
 
 
@@ -395,7 +409,6 @@ class ReplayBuffer:
         # 파이썬 tuple -> numpy array -> torch tensor
         # states는 각각 (17, H, W)이므로, np.array(states) -> (B, 17, H, W)
         states = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
-
         action_probs = torch.tensor(np.array(action_probs), dtype=torch.float32, device=self.device)
         results = torch.tensor(np.array(results), dtype=torch.float32, device=self.device)
 
@@ -407,35 +420,15 @@ class ReplayBuffer:
 # 6. 모델 학습 함수
 #####################################
 @timeit
-def _train(model: AlphaGoZeroNet, replay_buffer, optimizer, batch_size, epoch, epochs):
-    states, action_probs, results = replay_buffer.sample(batch_size)
-    if states is None:
-        print("Not enough samples in replay buffer.")
-        return False
-
-    # 순전파
-    policy_output, value_output = model(states.to(model.device))
-
-    # (1) Policy Loss: 크로스 엔트로피 (또는 음의 로그 우도)
-    #    action_probs(타겟)와 policy_output(예측) 간 비교
-    policy_loss = -torch.sum(action_probs * torch.log(policy_output + 1e-7), dim=1).mean()
-
-    # (2) Value Loss: MSE
-    value_output = value_output.squeeze()  # shape: (B,)
-    value_loss = F.mse_loss(value_output, results)
-
-    loss = policy_loss + value_loss
-
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    model.losses[len(model.losses)].append(loss.item())
-    print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
-    return True
-
-@timeit
-def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, optimizer_state_dict=None):
+def train_model(
+    model: AlphaGoZeroNet, 
+    replay_buffer: ReplayBuffer, 
+    batch_size, 
+    epochs, 
+    learning_rate=1e-3, 
+    earlystopping=20, 
+    optimizer_state_dict=None
+):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     model.optimizer = optimizer
     if optimizer_state_dict is not None:
@@ -443,10 +436,53 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
     model.train()
     # iteration 마다 loss 들을 저장하는 리스트
     model.losses[len(model.losses)+1] = []
+    best_model = None
+    
+    min_epoch = len(replay_buffer.buffer) // batch_size
+    min_epoch *= (min_epoch) ** 0.5
+    
     for epoch in range(epochs):
-        if not _train(model, replay_buffer, optimizer, batch_size, epoch, epochs):
-            break
         
+        states, action_probs, results = replay_buffer.sample(batch_size)
+        if states is None:
+            print("Not enough samples in replay buffer.")
+            return False
+
+        # 순전파
+        policy_output, value_output = model(states.to(model.device))
+
+        # (1) Policy Loss: 크로스 엔트로피 (또는 음의 로그 우도)
+        #    action_probs(타겟)와 policy_output(예측) 간 비교
+        policy_loss = -torch.sum(action_probs * torch.log(policy_output + 1e-7), dim=1).mean()
+
+        # (2) Value Loss: MSE
+        value_output = value_output.squeeze()  # shape: (B,)
+        value_loss = F.mse_loss(value_output, results)
+
+        loss = policy_loss + value_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        model.losses[len(model.losses)].append(loss.item())
+        
+        # Early Stopping
+        # print(earlystopping)
+
+        if earlystopping is not None:
+            if best_model is None or loss.item() == min(model.losses[len(model.losses)]):
+                best_model = model.copy()
+                patience = earlystopping
+                # print('best model updated')
+            elif epoch > min_epoch:
+                patience -= 1
+                if patience == 0:
+                    print(f"Epoch {epoch + 1}/{epochs} - Early Stopping")
+                    break
+
+        print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
+    model = best_model
     # return optimizer
 
 
@@ -461,6 +497,7 @@ def train(
     batch_size=16,
     epochs=100,
     learning_rate=1e-3,
+    earlystopping=20,
     capacity=2000,
     device=None, 
     pretrained_model_path=None,
@@ -506,6 +543,7 @@ def train(
                 batch_size=batch_size, 
                 epochs=epochs, 
                 learning_rate=learning_rate,
+                earlystopping=earlystopping,
                 optimizer_state_dict=optimizer_state_dict
             )
     except KeyboardInterrupt:
