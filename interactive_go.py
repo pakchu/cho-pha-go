@@ -181,6 +181,7 @@ class InteractiveGo:
         agent.to(device)
         agent.load(model_path)
         agent.eval()
+        agent.verbose = True
         replay_buffer = ReplayBuffer(capacity=10000, device=device)
 
         # 2) 상태 초기화
@@ -353,6 +354,74 @@ class InteractiveGo:
         pygame.quit()
 
 
+    def run_ai_vs_ai(self, model_path=None, device='cpu'):
+        """
+        AI vs AI 대국.
+        """
+        # 1) 모델 로드
+        if model_path is None:
+            model_path = f"models/cho_pha_go"
+        else:
+            model_path = f"{model_path}"
+        if model_path.endswith(f'_{self.board_size}x{self.board_size}.pt'):
+            pass
+        else:
+            model_path += f'_{self.board_size}x{self.board_size}.pt'
+        agent_black = AlphaGoZeroNet(board_size=self.board_size)
+        agent_white = AlphaGoZeroNet(board_size=self.board_size)
+        agent_black.to(device)
+        agent_white.to(device)
+        agent_black.load(model_path)
+        agent_white.load(model_path)
+        agent_black.eval()
+        agent_white.eval()
+        agent_black.verbose = False
+        agent_white.verbose = False
+
+        empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
+        game_state = State(board=empty_board, current_player=1)
+
+        running = True
+        self.update_display(game_state)
+
+        while running:
+            try:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        # 2) AI 차례
+                        agent = agent_black if game_state.current_player == 1 else agent_white
+                        with torch.no_grad():
+                            state_tensor = game_state.to_tensor().unsqueeze(0)
+                            tensor, policy_np = agent(state_tensor)
+
+                        move = agent.make_move(game_state)
+                        if move is not None and not game_state.is_valid_move(*move):
+                            running = False
+                            break
+
+                        game_state = game_state.apply_action(move)
+                        self.update_display(game_state)
+
+                        if game_state.is_terminal():
+                            winner = game_state.get_result()
+                            if winner == 1:
+                                print("흑(1) 승리!")
+                            elif winner == -1:
+                                print("백(-1) 승리!")
+                            else:
+                                print("무승부!")
+
+            except KeyboardInterrupt:
+                running = False
+                break
+
+        pygame.display.flip()
+        pygame.quit()
+        
+
 if __name__ == "__main__":
     # 예시 실행
     # 1) 9x9 보드에서 사람 vs 사람
@@ -361,4 +430,4 @@ if __name__ == "__main__":
 
     # 2) 5x5 보드에서 사람(흑) vs AI
     game = InteractiveGo(board_size=5)
-    game.run_player_vs_ai(player_black=True)
+    game.run_ai_vs_ai()

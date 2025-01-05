@@ -126,11 +126,176 @@ def is_valid_move_numba(board, prev_board, x, y, current_player):
     else:
         raise ValueError("Invalid prev_board shape")
 
+@numba.njit
+def get_territory_numba(board):
+    """
+    board 상의 빈 칸(0)들에 대해 Flood Fill 방식으로
+    각각의 영역 크기와 인접 색 정보를 조사하여
+    흑/백 집 개수를 최종적으로 반환한다.
+
+    - board: 2D numpy array (흑=1, 백=-1, 빈=0)
+    return: (black_territory, white_territory)
+    """
+    h, w = board.shape
+    visited = np.zeros((h, w), dtype=np.int32)
+
+    black_territory = 0
+    white_territory = 0
+
+    for y in range(h):
+        for x in range(w):
+            if board[y, x] == 0 and visited[y, x] == 0:
+                # 아직 방문하지 않은 빈 칸 -> 하나의 영역을 BFS/DFS로 찾음
+                q = [(x, y)]
+                visited[y, x] = 1
+                empty_coords = []
+                neighbor_colors = set()
+
+                while len(q) > 0:
+                    cx, cy = q.pop()
+                    empty_coords.append((cx, cy))
+
+                    # 상하좌우 확인
+                    neighbors = get_neighbors_numba(cx, cy, w, h)
+                    for nx, ny in neighbors:
+                        if board[ny, nx] == 0:
+                            # 빈 칸이면 같은 영역
+                            if visited[ny, nx] == 0:
+                                visited[ny, nx] = 1
+                                q.append((nx, ny))
+                        else:
+                            # 돌(흑=1, 백=-1)이면 해당 색을 기록
+                            # board[ny, nx] != 0인 경우만
+                            neighbor_colors.add(board[ny, nx])
+                
+                # 영역이 인접한 돌 색깔들 neighbor_colors
+                # 만약 {1}만 있다면 -> 흑만 인접 -> 흑 집
+                # 만약 {-1}만 있다면 -> 백만 인접 -> 백 집
+                # 둘 다 있거나 없는 경우(이론상 없지만) -> 공배
+                if len(neighbor_colors) == 1:
+                    color = neighbor_colors.pop()
+                    if color == 1:
+                        black_territory += len(empty_coords)
+                    elif color == -1:
+                        white_territory += len(empty_coords)
+                    # pop() 했으므로 다시 넣을 필요는 없음
+                # 공배(또는 복잡 케이스) -> 무시
+                # (실전 바둑에선 '양쪽 모두 인접'이라도 부분적인 생사관계 등에 따라
+                #  세부 해석이 다르지만, 여기서는 단순 무효로 처리)
+    return black_territory, white_territory
+
+@numba.njit
+def check_independent_liberties(board, liberties):
+    """
+    주어진 공배(liberties)가 독립된 영역인지 확인.
+    - Flood Fill로 공배의 독립된 영역을 계산.
+    """
+    h, w = board.shape
+    visited = np.zeros((h, w), dtype=np.int32)
+    independent_areas = 0
+
+    for lx, ly in liberties:
+        if visited[ly, lx] == 0:
+            # 새로운 독립된 공배 영역 발견 -> Flood Fill
+            queue = [(lx, ly)]
+            visited[ly, lx] = 1
+
+            while queue:
+                cx, cy = queue.pop()
+                for nx, ny in get_neighbors_numba(cx, cy, w, h):
+                    if (nx, ny) in liberties and visited[ny, nx] == 0:
+                        visited[ny, nx] = 1
+                        queue.append((nx, ny))
+
+            independent_areas += 1
+
+    return independent_areas
+
+
+@numba.njit
+def calculate_territory_with_alive_groups(board):
+    """
+    살아있는 돌에 의해 형성된 정당한 집 계산.
+    """
+    h, w = board.shape
+    visited = np.zeros((h, w), dtype=np.int32)
+
+    black_territory = 0
+    white_territory = 0
+
+    for y in range(h):
+        for x in range(w):
+            if board[y, x] == 0 and visited[y, x] == 0:
+                # 빈 칸 탐색
+                queue = [(x, y)]
+                visited[y, x] = 1
+                empty_coords = []
+                neighbor_colors = set()
+
+                while queue:
+                    cx, cy = queue.pop()
+                    empty_coords.append((cx, cy))
+
+                    for nx, ny in get_neighbors_numba(cx, cy, w, h):
+                        if board[ny, nx] == 0:
+                            if visited[ny, nx] == 0:
+                                visited[ny, nx] = 1
+                                queue.append((nx, ny))
+                        else:
+                            neighbor_colors.add(board[ny, nx])
+
+                # 집 판별
+                if len(neighbor_colors) == 1:
+                    color = neighbor_colors.pop()
+                    if color == 1:  # 흑돌
+                        black_territory += len(empty_coords)
+                    elif color == -1:  # 백돌
+                        white_territory += len(empty_coords)
+
+    return black_territory, white_territory         
+
+@numba.njit
+def check_alive_groups(board):
+    """
+    살아있는 돌 그룹의 집만 인정.
+    """
+    h, w = board.shape
+    visited = np.zeros((h, w), dtype=np.int32)
+    black_territory = 0
+    white_territory = 0
+
+    for y in range(h):
+        for x in range(w):
+            if board[y, x] != 0 and visited[y, x] == 0:
+                # 돌 그룹 탐색
+                group = get_group_numba(board, x, y)
+                for gx, gy in group:
+                    visited[gy, gx] = 1
+
+                # 공배 계산
+                liberties = get_liberties_numba(board, group)
+                if len(liberties) < 2:
+                    continue  # 공배가 두 개 미만이면 집 형성 불가
+
+                # 독립된 공배 영역 확인
+                independent_liberties = check_independent_liberties(board, liberties)
+                if independent_liberties >= 2:
+                    # 살아있는 그룹 판별
+                    color = board[y, x]
+                    if color == 1:  # 흑돌
+                        black_territory += len(liberties)
+                    elif color == -1:  # 백돌
+                        white_territory += len(liberties)
+
+    return black_territory, white_territory
+
+
 class FastState:
     def __init__(
         self,
         board: np.ndarray,
         current_player: int,
+        dum = 3.5,
         previous_board: np.ndarray = None,
         pass_count: int = 0,
         player_1_dead_stones: int = 0,
@@ -141,6 +306,7 @@ class FastState:
     ):
         self.board = board
         self.current_player = current_player
+        self.dum = dum
         self.previous_board = previous_board
         self.pass_count = pass_count
         self.player_1_dead_stones = player_1_dead_stones
@@ -232,14 +398,13 @@ class FastState:
         return False
 
     def get_result(self):
-        black_stones = np.sum(self.board == 1) - self.player_1_dead_stones
-        white_stones = np.sum(self.board == -1) - self.player_minus_1_dead_stones
-        if black_stones > white_stones:
-            return 1
-        elif white_stones > black_stones:
-            return -1
-        else:
-            return 0
+        black_territory, white_territory = check_alive_groups(self.board)
+        black_score = black_territory + self.player_minus_1_dead_stones
+        white_score = white_territory + self.player_1_dead_stones
+        if black_score == white_score == 0:
+            return 0  # 무승부
+        return 1 if black_score - self.dum > white_score else -1
+        
 
     def to_tensor(self) -> torch.Tensor:
         """
@@ -259,20 +424,25 @@ class FastState:
         #     이미 self.board 자체가 {1, -1, 0} 값을 가지므로 그대로 복사
         tensor[0, :, :] = self.board
 
-        # (2) 최근 8개 history 보드 채널 (channel 1~8)
+        # (2) 최근 6개 history 보드 채널 (channel 1~13)
         #     history[-1] = 가장 최근 상태
         #     history[-2] = 그 이전 ...
-        max_moves = 15
-        num_history = len(self.history)
+        max_moves = 12
+        history_len = len(self.history)
         for i in range(max_moves):
-            
-            (x, y, c) = self.history[num_history - i - 1] if i < num_history else (0, 0, 0)
-                
-            tensor[i+1, y, x] = c
-            
-
-        # (3) channel 9~15는 사용 안 함 => 이미 0으로 초기화되어 있으므로 그대로 둠
-        #     필요하면 여기에 다른 정보(패 정보, 사석 정보 등)를 넣을 수 있음.
+            if i >= history_len:
+                break
+            move = self.history[- i - 1]
+            x, y, player = move
+            if player == 1:
+                tensor[i//2 + 1, y, x] = 1.0
+            else:
+                tensor[7 + i//2, y, x] = -1.0
+        
+        # (3) channel 14~15는 사석 정보
+        tensor[14, :, :] = self.player_1_dead_stones if self.current_player == 1 else self.player_minus_1_dead_stones
+        tensor[15, :, :] = self.player_minus_1_dead_stones if self.current_player == 1 else self.player_1_dead_stones
+        
 
         # (4) channel 16 -> 현재 플레이어 표시
         #     알파고 제로 논문에선 (흑 차례=1, 백 차례=0) 식의 binary plane

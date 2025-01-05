@@ -19,6 +19,8 @@ def main():
                         help="If set, run player vs AI after optional training.")
     parser.add_argument("--player-black", action="store_true", default=True,
                         help="If set, human player is black (default is white).")
+    parser.add_argument("--ai-vs-ai", action="store_true", default=False,
+                        help="If set, run AI vs AI game.")
 
     # 학습 관련 옵션
     parser.add_argument("--train", action="store_true", default=False,
@@ -90,12 +92,18 @@ def main():
         import interactive_go
         # 플레이 세팅
         # interactive_go 모듈에서 board_size 등을 받을 수 있게 구현했다면 넘겨줍니다
-        interactive_go.InteractiveGo(
+        interactive = interactive_go.InteractiveGo(
             board_size=args.board_size,
-        ).run_player_vs_ai(
-            player_black=args.player_black,
-            model_path=args.pretrained_model_path
         )
+        if args.ai_vs_ai:
+            interactive.run_ai_vs_ai(
+                model_path=args.pretrained_model_path
+            )
+        else:
+            interactive.run_player_vs_ai(
+                player_black=args.player_black,
+                model_path=args.pretrained_model_path
+            )
 
     # 만약 train이나 play 옵션 둘 다 없으면, 도움말 출력
     if not args.train and not args.play:

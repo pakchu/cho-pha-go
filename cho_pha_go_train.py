@@ -17,12 +17,13 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # 1. 알파고 제로 신경망 정의
 #####################################
 class AlphaGoZeroNet(nn.Module):
-    def __init__(self, board_size=19):
+    def __init__(self, board_size=19, verbose=False):
         super(AlphaGoZeroNet, self).__init__()
         self.device = None
         self.board_size = board_size
         self.losses = defaultdict(list)
         self.optimizer = None
+        self.verbose = verbose
         # 네트워크 크기 동적 조정
         if board_size <= 9:
             self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
@@ -218,7 +219,7 @@ class AlphaGoZeroNet(nn.Module):
         """
         self.eval()
         root = self.mcts_search(state, num_simulations=800)
-        return root.best_action(temperature=temperature)
+        return root.best_action(temperature=temperature, verbose=self.verbose)
 
 
 #####################################
@@ -271,7 +272,7 @@ class MCTSNode:
         self.visits += 1
         self.value_sum += value
 
-    def best_action(self, temperature=1.0):
+    def best_action(self, temperature=1.0, verbose=False):
         """
         가장 좋은 행동 리턴.
         temperature=0이면 방문 수가 가장 많은 행동을,
@@ -289,7 +290,10 @@ class MCTSNode:
             probs = visits / total
             probs = probs.reshape(-1)
             actions = list(self.children.keys())
-
+            if verbose:
+                print(f"Visits: {visits}")
+                print(f"Probs: {probs}")
+                print(f"Actions: {actions}")
             return actions[np.random.choice(np.arange(len(actions)), p=probs.tolist())]
 
 
@@ -301,11 +305,12 @@ class MCTSNode:
 # 4. 자가 대국(self-play)
 #####################################
 @timeit
-def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, temperature=1.0):
+def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, temperature=1.0, debug=False, device='cpu'):
     """
     한 판을 완주할 때까지 MCTS로 행동을 선택하고,
     (state_tensor, action_probs, 최종결과)를 리턴.
     """
+    model = model.to(device)
     data = []  # (state_tensor, action_probs, result)
     current_state = init_state
 
@@ -330,8 +335,6 @@ def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, tem
             else:
                 if current_state.is_terminal():
                     break
-                else:
-                    breakpoint()
 
         # 4) 학습 데이터 저장
         #    - 모델 입력: 현재 state's to_tensor()
@@ -354,7 +357,11 @@ def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, tem
 
         # 5) 실제 게임 상태 업데이트
         current_state = current_state.apply_action(action)
-
+    if debug:
+        from go import go_board
+        print(f"Game Over: {current_state.get_result()}")
+        print(current_state.board)
+        print(go_board.get_territory_numba(current_state.board))
     # 게임 종료 후 승패 결과
     result = current_state.get_result()  # 1(흑승) / -1(백승) / 0(무승부)
 
@@ -489,11 +496,19 @@ def train_model(
 #####################################
 # 7. 실제 학습 루프
 #####################################
+def self_play_worker(args):
+    """멀티프로세싱에서 사용할 단일 게임 처리 함수"""
+    try:
+        model, init_state, num_simulations, temperature = args
+        return self_play(model, init_state, num_simulations=num_simulations, temperature=temperature)
+    except KeyboardInterrupt:
+        return None
+
 def train(
     board_size=19, 
-    num_iterations=10,     # 자가 대국 + 학습을 몇 번 반복할지
-    games_per_iteration=2, # 매 iteration마다 몇 판의 자가 대국을 할지
-    num_simulations=50,    # MCTS 시뮬레이션 횟수
+    num_iterations=10,     
+    games_per_iteration=2, 
+    num_simulations=50,    
     batch_size=16,
     epochs=100,
     learning_rate=1e-3,
@@ -502,6 +517,7 @@ def train(
     device=None, 
     pretrained_model_path=None,
     save_model_path=None,
+    num_workers=4  # 병렬 처리에 사용할 프로세스 수
 ):
     model = AlphaGoZeroNet(board_size=board_size)
     optimizer_state_dict = None
@@ -510,30 +526,32 @@ def train(
             model.load(pretrained_model_path)
     device = torch.device(device)
     model = model.to(device)
+    model.verbose = False
     model.to(torch.float32)
     
     # 리플레이 버퍼
     replay_buffer = ReplayBuffer(capacity=capacity, device=device)
 
-    
     try:
         for it in range(num_iterations):
             print(f"\n=== Iteration {it+1} / {num_iterations} ===")
 
-            # 1) 자가 대국 진행 후 데이터 수집
-            for g in range(games_per_iteration):
-                # 초기 바둑판 상태(모두 빈칸), 흑 선공
-                empty_board = np.zeros((board_size, board_size), dtype=np.int32)
-                init_state = State(empty_board, current_player=1, previous_board=None)
+            # 1) 자가 대국 진행 후 데이터 수집 (멀티프로세싱 활용)
+            print(f"Starting self-play with {games_per_iteration} games...")
+            empty_board = np.zeros((board_size, board_size), dtype=np.int32)
 
-                # 한 판 자가 대국
-                game_data = self_play(
-                    model,
-                    init_state, 
-                    num_simulations=num_simulations, 
-                    temperature=1.0
-                )
-                replay_buffer.store(game_data)
+            # 병렬 처리를 위한 초기 상태 리스트
+            states = [
+                (model, State(empty_board.copy(), current_player=1), num_simulations, 1.0)
+                for _ in range(games_per_iteration)
+            ]
+            Pool = mp.Pool(processes=num_workers)
+            with Pool as pool:
+                results = pool.map(self_play_worker, states)
+
+            for game_data in results:
+                if game_data is not None:
+                    replay_buffer.store(game_data)
 
             # 2) 버퍼에서 샘플을 뽑아 모델 학습
             print("Training...")
@@ -546,15 +564,25 @@ def train(
                 earlystopping=earlystopping,
                 optimizer_state_dict=optimizer_state_dict
             )
+            if save_model_path is None:
+                save_model_path = f'models/cho_pha_go'
+            model.save(save_model_path)
     except KeyboardInterrupt:
         print("KeyboardInterrupt")
-
-    if save_model_path is None:
-        save_model_path = f'models/cho_pha_go'
-    model.save(save_model_path)
+    finally:
+        # 학습 중단 시 프로세스 종료
+        try:
+            Pool.terminate()
+            Pool.join()
+        except KeyboardInterrupt:
+            pass
+    
 
 
 if __name__ == "__main__":
     board_size = 5  # 테스트용 작은 크기 예시
-    train(board_size=board_size)
-    breakpoint()
+    model = AlphaGoZeroNet(board_size=board_size)
+    model.load('models/cho_pha_go_5x5.pt')
+    model.verbose = False
+    self_play(model, State(np.zeros((board_size, board_size), dtype=np.int32), current_player=1, previous_board=None), num_simulations=800, temperature=1.0, debug=True)
+
