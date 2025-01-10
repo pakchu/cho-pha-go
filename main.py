@@ -62,7 +62,7 @@ def main():
             args.save_path = f'models/{args.save_path}'
         if not args.save_path.endswith(f'{args.board_size}x{args.board_size}.pt'):
             args.save_path += f'_{args.board_size}x{args.board_size}.pt'
-        
+    os.environ.setdefault("BOARD_SIZE", str(args.board_size))
     # --------------------------------------------------------
     # 1) 학습(train)
     # --------------------------------------------------------

@@ -10,7 +10,7 @@ import torch.optim as optim
 from go_tf import Position
 from features import position_to_tensor
 import warnings
-from utils import timeit
+from utils import timeit, time_record, time_records
 
 warnings.filterwarnings("ignore", category=UserWarning)
 np.random.seed(42)
@@ -18,6 +18,7 @@ np.random.seed(42)
 # 1. 알파고 제로 신경망 정의
 #####################################
 class AlphaGoZeroNet(nn.Module):
+    @time_record
     def __init__(self, board_size=19, verbose=False):
         super(AlphaGoZeroNet, self).__init__()
         self.device = None
@@ -66,6 +67,7 @@ class AlphaGoZeroNet(nn.Module):
             nn.Tanh()
         )
 
+    @time_record
     def _build_residual_block(self):
         """
         Residual Block 정의
@@ -78,6 +80,7 @@ class AlphaGoZeroNet(nn.Module):
             nn.BatchNorm2d(self.num_filters)
         )
 
+    @time_record
     def forward(self, x):
         """
         모델 순전파
@@ -93,11 +96,13 @@ class AlphaGoZeroNet(nn.Module):
         return policy, value
 
         
+    @time_record
     def to(self, *args, **kwargs):
         self = super().to(*args, **kwargs)
         self.device = self.get_device()
         return self
     
+    @time_record
     def get_device(self):
         # 파라미터 확인
         param = next(self.parameters(), None)
@@ -110,6 +115,7 @@ class AlphaGoZeroNet(nn.Module):
         # 기본값
         return torch.device("cpu")
 
+    @time_record
     def copy(self):
         """
         모델 복사
@@ -120,6 +126,7 @@ class AlphaGoZeroNet(nn.Module):
         model.losses = copy.copy(self.losses)
         return model
     
+    @time_record
     def save(
         self, 
         path, 
@@ -137,6 +144,7 @@ class AlphaGoZeroNet(nn.Module):
         )
         print(f"Model saved to {path}.")
     
+    @time_record
     def load(
         self,
         path,
@@ -148,6 +156,8 @@ class AlphaGoZeroNet(nn.Module):
         self.losses = checkpoint['losses']
         print(f"Model loaded from {path}.")
 
+    @torch.no_grad()
+    @time_record
     def mcts_search(self, state: Position, num_simulations=800):
         """
         MCTS 탐색 루틴. root 노드로부터 시뮬레이션 여러 번 수행.
@@ -171,29 +181,23 @@ class AlphaGoZeroNet(nn.Module):
 
                 board_size = state.board.shape[0]
                 # policy를 보드 형태로 reshape
-                policy_2d = policy.reshape(board_size, board_size)
+                # 바둑판 좌표 확률
+                policy_2d = policy.reshape(board_size, board_size)  # 첫 n^2 요소만 reshape
 
                 # 합법 착수
                 legal_moves = node.state.all_legal_move_coords()
                 action_probs = []
                 total_prob = 0.0
-
                 for move in legal_moves:
-                    if move is None:
-                        # 패스 처리
-                        # 예) 패스의 확률을 임의로 1/board_size^2 중 하나로 배정하거나,
-                        #    혹은 별도 하이퍼파라미터로 설정할 수도 있습니다.
-                        #    여기서는 간단히 policy 전체 평균값을 주는 예시:
-                        pass_prob = policy.mean()  # 또는 0.1, etc.
-                        action_probs.append((None, pass_prob))
-                        total_prob += pass_prob
-                    else:
-                        if move == (0, 1) and state.to_play == 1:
-                            breakpoint()
-                        x, y = move
-                        p = policy_2d[y][x]
-                        action_probs.append(((x, y), p))
-                        total_prob += p
+                    # if move is None:
+                    #     # 패스 처리
+                    #     action_probs.append((None, pass_prob))
+                    #     total_prob += pass_prob
+                    # else:
+                    x, y = move
+                    p = policy_2d[y][x]
+                    action_probs.append(((x, y), p))
+                    total_prob += p
 
                 # 합이 0이면(정말 드문 케이스) 균등 분포로 대체
                 if total_prob > 0:
@@ -205,17 +209,19 @@ class AlphaGoZeroNet(nn.Module):
                 node.expand(action_probs)
             else:
                 # 터미널이면 value를 그대로 사용
-                value = node.state.is_game_over()
+                if node.state.is_game_over():
+                    value = node.state.result()
 
             # 3) Backpropagation
             # 현재 node부터 부모 방향으로 value를 반전시키며 업데이트
             while node is not None:
                 node.update(value)
-                value = -value
+                value = -int(value)
                 node = node.parent
 
         return root
     
+    @time_record
     def make_move(self, state: Position, temperature=1.0):
         """
         현재 상태에서 MCTS를 이용해 행동을 선택
@@ -229,6 +235,7 @@ class AlphaGoZeroNet(nn.Module):
 # 2. MCTS 구현
 #####################################
 class MCTSNode:
+    @time_record
     def __init__(self, state: Position, parent=None):
         self.state = state
         self.parent = parent
@@ -237,6 +244,7 @@ class MCTSNode:
         self.value_sum = 0
         self.policy = 0  # 이 노드(action)에 대한 policy 확률
 
+    @time_record
     def expand(self, action_probs):
         """
         현재 노드에서 가능한 모든 합법 착수에 대해 자식 노드를 만들고,
@@ -244,13 +252,19 @@ class MCTSNode:
         """
         for action, prob in action_probs:
             if action not in self.children:
-                
-                self.children[action] = MCTSNode(
-                    self.state.play_move(action, color=self.state.to_play),
-                    parent=self
-                )
-                self.children[action].policy = prob
+                # if action is None:
+                #     self.children[action] = MCTSNode(
+                #         self.state.pass_move(),
+                #         parent=self
+                #     )
+                if self.state.is_move_legal(action):
+                    self.children[action] = MCTSNode(
+                        self.state.play_move(action, color=self.state.to_play),
+                        parent=self
+                    )
+                    self.children[action].policy = prob
 
+    @time_record
     def select_child(self, exploration_param=1.4):
         """UCB를 최대화하는 자식 노드 선택"""
         best_score = -float('inf')
@@ -262,6 +276,7 @@ class MCTSNode:
                 best_child = child
         return best_child
 
+    @time_record
     def _ucb_score(self, child, exploration_param):
         if child.visits == 0:
             return float('inf')  # 아직 방문 안 한 자식은 우선적으로 탐색
@@ -271,11 +286,13 @@ class MCTSNode:
               np.sqrt(np.log(self.visits) / child.visits)
         return ucb
 
+    @time_record
     def update(self, value):
         """백업(역전파)"""
         self.visits += 1
         self.value_sum += value
 
+    @time_record
     def best_action(self, temperature=1.0, verbose=False):
         """
         가장 좋은 행동 리턴.
@@ -309,6 +326,7 @@ class MCTSNode:
 # 4. 자가 대국(self-play)
 #####################################
 @timeit
+@time_record
 def self_play(model: AlphaGoZeroNet, init_state: Position, num_simulations=800, temperature=1.0, debug=False, device='cpu'):
     """
     한 판을 완주할 때까지 MCTS로 행동을 선택하고,
@@ -330,12 +348,15 @@ def self_play(model: AlphaGoZeroNet, init_state: Position, num_simulations=800, 
         if temperature == 0:
             # 방문수가 가장 많은 액션 선택
             action = max(root.children, key=lambda a: root.children[a].visits)
+            a = 1
         else:
             # 방문 수를 temperature^(-1) power로 변형 후 확률화
             visits = visits ** (1.0 / temperature)
             visits /= np.sum(visits)
             if len(actions) > 0:
+
                 action = actions[np.random.choice(len(actions), p=visits)]
+
             else:
                 if current_state.is_game_over():
                     break
@@ -346,11 +367,11 @@ def self_play(model: AlphaGoZeroNet, init_state: Position, num_simulations=800, 
         #      => 여기서는 root 노드의 policy 출력을 그대로 방문 횟수 분포로 사용.
         #      이 또한 (board_size*board_size,) 형태
         board_size = current_state.board.shape[0]
-        full_action_probs = np.zeros((board_size * board_size + 1,), dtype=np.float32)
+        full_action_probs = np.zeros((board_size * board_size,), dtype=np.float32)
         for i, act in enumerate(actions):
-            if act is None:
-                full_action_probs[-1] = probs[i]
-                continue
+            # if act is None:
+            #     full_action_probs[-1] = probs[i]
+            #     continue
             x, y = act
             idx = y * board_size + x
             full_action_probs[idx] = probs[i]
@@ -359,10 +380,13 @@ def self_play(model: AlphaGoZeroNet, init_state: Position, num_simulations=800, 
         data.append((state_tensor, full_action_probs, None))
 
         # 5) 실제 게임 상태 업데이트
-        if action is None:
-            current_state = current_state.pass_move()
-        else:
+        # if action is None:
+        #     current_state = current_state.pass_move()
+        # else:
+        try:
             current_state = current_state.play_move(action, color=current_state.to_play)
+        except:
+            breakpoint()
 
     # 게임 종료 후 승패 결과
     result = current_state.result()
@@ -386,6 +410,7 @@ def self_play(model: AlphaGoZeroNet, init_state: Position, num_simulations=800, 
 # 5. 리플레이 버퍼
 #####################################
 class ReplayBuffer:
+    @time_record
     def __init__(self, capacity=10000, device = None):
         """
         자가 대국에서 얻은 (state_tensor, action_probs, result)를 저장하는 버퍼
@@ -395,6 +420,7 @@ class ReplayBuffer:
         """
         self.buffer = deque(maxlen=capacity)
         self.device = device
+    @time_record
     def store(self, game_data):
         """
         game_data: List of (state_tensor, action_probs, result)
@@ -404,6 +430,7 @@ class ReplayBuffer:
         """
         self.buffer.extend(game_data)
 
+    @time_record
     def sample(self, batch_size):
         """
         배치 크기(batch_size)만큼 랜덤 샘플링하여, 
@@ -424,7 +451,8 @@ class ReplayBuffer:
 
         # 파이썬 tuple -> numpy array -> torch tensor
         # states는 각각 (17, H, W)이므로, np.array(states) -> (B, 17, H, W)
-        states_tensor = torch.tensor(np.array(states_tensor), dtype=torch.float32, device=self.device)
+
+        states_tensor = torch.concat([state.unsqueeze(0) for state in states], dim=0)
         action_probs = torch.tensor(np.array(action_probs), dtype=torch.float32, device=self.device)
         results = torch.tensor(np.array(results), dtype=torch.float32, device=self.device)
 
@@ -436,6 +464,7 @@ class ReplayBuffer:
 # 6. 모델 학습 함수
 #####################################
 @timeit
+@time_record
 def train_model(
     model: AlphaGoZeroNet, 
     replay_buffer: ReplayBuffer, 
@@ -450,6 +479,7 @@ def train_model(
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
     model.train()
+    model.to()
     # iteration 마다 loss 들을 저장하는 리스트
     model.losses[len(model.losses)+1] = []
     best_model = None
@@ -505,14 +535,16 @@ def train_model(
 #####################################
 # 7. 실제 학습 루프
 #####################################
+@time_record
 def self_play_worker(args):
     """멀티프로세싱에서 사용할 단일 게임 처리 함수"""
-    try:
-        model, init_state, num_simulations, temperature = args
-        return self_play(model, init_state, num_simulations=num_simulations, temperature=temperature)
-    except KeyboardInterrupt:
-        return None
+    # try:
+    model, init_state, num_simulations, temperature = args
+    return self_play(model, init_state, num_simulations=num_simulations, temperature=temperature)
+    # except KeyboardInterrupt:
+    #     return None
 
+@time_record
 def train(
     board_size=19, 
     num_iterations=10,     
@@ -564,9 +596,17 @@ def train(
             
             # multi processing을 사용하지 않고 단일 프로세스로 실행
             for _ in range(games_per_iteration):
-                game_data = self_play(model, Position(board=np.zeros((board_size, board_size), dtype=np.int32), to_play=1), num_simulations=num_simulations, temperature=1.0, debug=True)
+                game_data = self_play(
+                    model, 
+                    Position(board=np.zeros((board_size, board_size), dtype=np.int32), to_play=1), 
+                    num_simulations=num_simulations, 
+                    temperature=1.0, 
+                    debug=True, 
+                    # device=device
+                )
+                model.to(device)
                 replay_buffer.store(game_data)
-
+            # model.to(device)
             # 2) 버퍼에서 샘플을 뽑아 모델 학습
             print("Training...")
             train_model(
@@ -576,20 +616,24 @@ def train(
                 epochs=epochs, 
                 learning_rate=learning_rate,
                 earlystopping=earlystopping,
-                optimizer_state_dict=optimizer_state_dict
+                optimizer_state_dict=optimizer_state_dict,
             )
-            if save_model_path is None:
-                save_model_path = f'models/cho_pha_go'
-            model.save(save_model_path)
     except KeyboardInterrupt:
+        if save_model_path is None:
+            save_model_path = f'models/cho_pha_go'
+            model.save(save_model_path)
+        import pandas as pd
+        df = pd.Series(time_records).sort_values(ascending=False)
+        pd.set_option('display.max_rows', None)
+        print(df)
         print("KeyboardInterrupt")
-    finally:
-        # 학습 중단 시 프로세스 종료
-        # try:
-        #     Pool.terminate()
-        #     Pool.join()
-        # except KeyboardInterrupt:
-            pass
+    # finally:
+    #     # 학습 중단 시 프로세스 종료
+    #     # try:
+    #     #     Pool.terminate()
+    #     #     Pool.join()
+    #     # except KeyboardInterrupt:
+    #         pass
     
 
 

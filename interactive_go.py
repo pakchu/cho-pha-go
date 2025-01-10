@@ -141,11 +141,11 @@ class InteractiveGo:
 
                     # 범위 확인
                     if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
-                        if game_state.is_valid_move(board_x, board_y):
-                            game_state = game_state.apply_action((board_x, board_y))
+                        if game_state.is_move_legal((board_x, board_y)):
+                            game_state = game_state.play_move((board_x, board_y))
                             # 게임 종료 체크
-                            if game_state.is_terminal():
-                                winner = game_state.get_result()
+                            if game_state.is_game_over():
+                                winner = game_state.result()
                                 if winner == 1:
                                     print("흑(1) 승리!")
                                 elif winner == -1:
@@ -229,8 +229,8 @@ class InteractiveGo:
                                 game_state.pass_count += 1
                                 turn = -turn
                                 game_state.to_play = -game_state.to_play
-                                if game_state.is_terminal():
-                                    winner = game_state.get_result()
+                                if game_state.is_game_over():
+                                    winner = game_state.result()
 
                                     if winner == 1:
                                         print(f"흑(1) {'플레이어' if player_black else '조파고'} 승리!")
@@ -271,9 +271,9 @@ class InteractiveGo:
                         # (A) 사람이 둘 차례
                         if turn == 1:
                             if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
-                                if game_state.is_valid_move(board_x, board_y):
+                                if game_state.is_move_legal((board_x, board_y)):
                                     # 1) 현재 상태 텐서
-                                    state_tensor = game_state.to_tensor()
+                                    state_tensor = position_to_tensor(game_state)
 
                                     # 2) 사람이 둔 수 → one-hot
                                     board_sz = self.board_size
@@ -285,13 +285,13 @@ class InteractiveGo:
                                     data_this_game.append((state_tensor.squeeze(0), human_probs, None))
 
                                     # 착수
-                                    game_state = game_state.apply_action((board_x, board_y))
+                                    game_state = game_state.play_move((board_x, board_y))
                                     turn = -turn
                                     self.update_display(game_state)
 
                                     # 종료 체크
-                                    if game_state.is_terminal():
-                                        winner = game_state.get_result()
+                                    if game_state.is_game_over():
+                                        winner = game_state.result()
                                         # 데이터에 결과를 부여
                                         final_data = []
                                         for (st, ap, _) in data_this_game:
@@ -308,13 +308,13 @@ class InteractiveGo:
                             
                             agent.eval()
                             with torch.no_grad():
-                                state_tensor = game_state.to_tensor().unsqueeze(0)
+                                state_tensor = position_to_tensor(game_state).unsqueeze(0)
                                 tensor, policy_np = agent(state_tensor)
 
                             move = agent.make_move(game_state)
                             
                             # when ai skips & game is valid
-                            if move is not None and not game_state.is_valid_move(*move):
+                            if move is not None and not game_state.is_move_legal(move):
                                 running = False
                                 break
 
@@ -323,12 +323,12 @@ class InteractiveGo:
 
                             # 착수
 
-                            game_state = game_state.apply_action(move)
+                            game_state = game_state.play_move(move)
                             turn = -turn
                             self.update_display(game_state)
 
-                            if game_state.is_terminal():
-                                winner = game_state.get_result()
+                            if game_state.is_game_over():
+                                winner = game_state.result()
                                 # 전체 데이터에 결과 부여
                                 final_data = []
                                 for (st, ap, _) in data_this_game:
@@ -369,16 +369,15 @@ class InteractiveGo:
             pass
         else:
             model_path += f'_{self.board_size}x{self.board_size}.pt'
-        agent_black = AlphaGoZeroNet(board_size=self.board_size)
-        agent_white = AlphaGoZeroNet(board_size=self.board_size)
-        agent_black.to(device)
-        agent_white.to(device)
-        agent_black.load(model_path)
-        agent_white.load(model_path)
-        agent_black.eval()
-        agent_white.eval()
-        agent_black.verbose = False
-        agent_white.verbose = False
+        agent = AlphaGoZeroNet(board_size=self.board_size)
+        agent.to(device)
+
+        agent.load(model_path)
+
+        agent.eval()
+
+        agent.verbose = False
+
 
         empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
         game_state = Position(board=empty_board, to_play=1)
@@ -394,21 +393,20 @@ class InteractiveGo:
 
                     if event.type == pygame.MOUSEBUTTONDOWN:
                         # 2) AI 차례
-                        agent = agent_black if game_state.to_play == 1 else agent_white
                         with torch.no_grad():
-                            state_tensor = game_state.to_tensor().unsqueeze(0)
+                            state_tensor = position_to_tensor(game_state).unsqueeze(0)
                             tensor, policy_np = agent(state_tensor)
 
                         move = agent.make_move(game_state)
-                        if move is not None and not game_state.is_valid_move(*move):
+                        if move is not None and not game_state.is_move_legal(move):
                             running = False
                             break
 
-                        game_state = game_state.apply_action(move)
+                        game_state = game_state.play_move(move)
                         self.update_display(game_state)
 
-                        if game_state.is_terminal():
-                            winner = game_state.get_result()
+                        if game_state.is_game_over():
+                            winner = game_state.result()
                             if winner == 1:
                                 print("흑(1) 승리!")
                             elif winner == -1:

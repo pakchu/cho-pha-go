@@ -27,7 +27,7 @@ import copy
 import itertools
 import numpy as np
 import os
-
+from utils import time_record
 
 
 N = int(os.environ.get('BOARD_SIZE', 19))
@@ -43,6 +43,7 @@ ALL_COORDS = [(i, j) for i in range(N) for j in range(N)]
 EMPTY_BOARD = np.zeros([N, N], dtype=np.int8)
 
 
+@time_record
 def _check_bounds(c):
     return 0 <= c[0] < N and 0 <= c[1] < N
 
@@ -66,11 +67,13 @@ class PositionWithContext(namedtuple('SgfPosition', ['position', 'next_move', 'r
 
 
 
+@time_record
 def place_stones(board, color, stones):
     for s in stones:
         board[s] = color
 
 
+@time_record
 def replay_position(position, result):
     """
     Wrapper for a go.Position which replays its history.
@@ -90,6 +93,7 @@ def replay_position(position, result):
         pos = pos.play_move(next_move, color=color)
 
 
+@time_record
 def find_reached(board, c):
     color = board[c]
     chain = set([c])
@@ -106,6 +110,7 @@ def find_reached(board, c):
     return chain, reached
 
 
+@time_record
 def is_koish(board, c):
     'Check if c is surrounded on all sides by 1 color, and return that color'
     if board[c] != EMPTY:
@@ -117,6 +122,7 @@ def is_koish(board, c):
         return None
 
 
+@time_record
 def is_eyeish(board, c):
     'Check if c is an eye, for the purpose of restricting MC rollouts.'
     # pass is fine.
@@ -145,12 +151,14 @@ class Group(namedtuple('Group', ['id', 'stones', 'liberties', 'color'])):
     color: color of this group
     """
 
+    @time_record
     def __eq__(self, other):
         return self.stones == other.stones and self.liberties == other.liberties and self.color == other.color
 
 
 class LibertyTracker():
     @staticmethod
+    @time_record
     def from_board(board):
         board = np.copy(board)
         curr_group_id = 0
@@ -180,6 +188,7 @@ class LibertyTracker():
 
         return lib_tracker
 
+    @time_record
     def __init__(self, group_index=None, groups=None, liberty_cache=None, max_group_id=1):
         # group_index: a NxN numpy array of group_ids. -1 means no group
         # groups: a dict of group_id to groups
@@ -191,6 +200,7 @@ class LibertyTracker():
                                                                                       N, N], dtype=np.uint8)
         self.max_group_id = max_group_id
 
+    @time_record
     def __deepcopy__(self, memodict={}):
         new_group_index = np.copy(self.group_index)
         new_lib_cache = np.copy(self.liberty_cache)
@@ -198,6 +208,7 @@ class LibertyTracker():
         new_groups = copy.copy(self.groups)
         return LibertyTracker(new_group_index, new_groups, liberty_cache=new_lib_cache, max_group_id=self.max_group_id)
 
+    @time_record
     def add_stone(self, color, c):
         assert self.group_index[c] == MISSING_GROUP_ID
         captured_stones = set()
@@ -237,6 +248,7 @@ class LibertyTracker():
 
         return captured_stones
 
+    @time_record
     def _merge_from_played(self, color, played, libs, other_group_ids):
         stones = {played}
         liberties = set(libs)
@@ -262,6 +274,7 @@ class LibertyTracker():
 
         return result
 
+    @time_record
     def _capture_group(self, group_id):
         dead_group = self.groups.pop(group_id)
         for s in dead_group.stones:
@@ -269,6 +282,7 @@ class LibertyTracker():
             self.liberty_cache[s] = 0
         return dead_group.stones
 
+    @time_record
     def _update_liberties(self, group_id, add=set(), remove=set()):
         group = self.groups[group_id]
         new_libs = (group.liberties | add) - remove
@@ -279,6 +293,7 @@ class LibertyTracker():
         for s in self.groups[group_id].stones:
             self.liberty_cache[s] = new_lib_count
 
+    @time_record
     def _handle_captures(self, captured_stones):
         for s in captured_stones:
             for n in NEIGHBORS[s]:
@@ -287,6 +302,7 @@ class LibertyTracker():
                     self._update_liberties(group_id, add={s})
 
 class Position():
+    @time_record
     def __init__(self, board: np.ndarray, n=0, komi=3.5, caps=(0, 0),
                  lib_tracker=None, ko=None, recent=tuple(),
                  board_deltas=None, to_play=1, last=None): # to_play: BLACK or WHITE
@@ -320,11 +336,13 @@ class Position():
                                                                                    0, N, N], dtype=np.int8)
         self.to_play = to_play
 
+    @time_record
     def __deepcopy__(self, memodict={}):
         new_board = np.copy(self.board)
         new_lib_tracker = copy.deepcopy(self.lib_tracker)
         return Position(new_board, self.n, self.komi, self.caps, new_lib_tracker, self.ko, self.recent, self.board_deltas, self.to_play, self.last)
 
+    @time_record
     def __str__(self, colors=True):
         if colors:
             pretty_print_map = {
@@ -369,6 +387,7 @@ class Position():
             self.n, *captures)
         return annotated_board + details
 
+    @time_record
     def is_move_suicidal(self, move):
         potential_libs = set()
         for n in NEIGHBORS[move]:
@@ -387,6 +406,7 @@ class Position():
         potential_libs -= set([move])
         return not potential_libs
 
+    @time_record
     def is_move_legal(self, move):
         'Checks that a move is on an empty space, not on ko, and not suicide'
         if move is None:
@@ -400,9 +420,11 @@ class Position():
 
         return True
 
+    @time_record
     def all_legal_moves(self):
         'Returns a np.array of size go.N**2 + 1, with 1 = legal, 0 = illegal'
-        # by default, every move is legal
+        # @time_recordby 
+        # default, every move is legal
         legal_moves = np.ones([N, N], dtype=np.int8)
         # ...unless there is already a stone there
         legal_moves[self.board != EMPTY] = 0
@@ -427,36 +449,54 @@ class Position():
             legal_moves[self.ko] = 0
         
         # and pass is always legal
-        return np.concatenate([legal_moves.ravel(), [1]])
+        # return np.concatenate([legal_moves.ravel(), [1]])
+        return legal_moves.ravel()
     
+    @time_record
+    def all_legal_move_coords_with_pass(self):
+        res = []
+        legal_moves = self.all_legal_moves()
+        for i, c in enumerate(legal_moves[:-1]):
+            if c:
+                res.append((i // N, i % N))
+        if legal_moves[-1]:
+            res.append(None)
+        return res
+    
+    @time_record
     def all_legal_move_coords(self):
         res = []
-        for c in self.all_legal_moves():
+        legal_moves = self.all_legal_moves()
+        for i, c in enumerate(legal_moves):
             if c:
-                res.append((c // N, c % N))
+                res.append((i // N, i % N))
         return res
 
-    def pass_move(self):
-        pos = self
-        pos.last = self.__deepcopy__()
-        pos.n += 1
-        pos.recent += (PlayerMove(pos.to_play, None),)
-        pos.board_deltas = np.concatenate((
-            np.zeros([1, N, N], dtype=np.int8),
-            pos.board_deltas[:6]))
-        pos.to_play *= -1
-        pos.ko = None
-        return pos
+    # @time_record
+    # def pass_move(self):
+    #     pos = self
+    #     pos.last = self.__deepcopy__()
+    #     pos.n += 1
+    #     pos.recent += (PlayerMove(pos.to_play, None),)
+    #     pos.board_deltas = np.concatenate((
+    #         np.zeros([1, N, N], dtype=np.int8),
+    #         pos.board_deltas[:6]))
+    #     pos.to_play *= -1
+    #     pos.ko = None
+    #     return pos
 
+    @time_record
     def flip_playerturn(self, mutate=False):
         pos = self if mutate else copy.deepcopy(self)
         pos.ko = None
         pos.to_play *= -1
         return pos
 
+    @time_record
     def get_liberties(self):
         return self.lib_tracker.liberty_cache
 
+    @time_record
     def play_move(self, c, color=None, mutate=False):
         # Obeys CGOS Rules of Play. In short:
         # No suicides
@@ -469,7 +509,7 @@ class Position():
         pos = self if mutate else copy.deepcopy(self)
 
         if c is None:
-            pos = pos.pass_move(mutate=mutate)
+            pos = pos.pass_move()
             return pos
 
         if not self.is_move_legal(c):
@@ -512,11 +552,14 @@ class Position():
         pos.to_play *= -1
         return pos
 
+    @time_record
     def is_game_over(self):
-        return (len(self.recent) >= 2 and
-                self.recent[-1].move is None and
-                self.recent[-2].move is None)
+        # return int(len(self.recent) >= 2 and
+        #         self.recent[-1].move is None and
+        #         self.recent[-2].move is None and np.sum(self.board == 0) < N * N / 2)
+        return np.sum(self.board==1) >= 0.6 * N * N or np.sum(self.board==-1) >= 0.6 * N * N or self.all_legal_moves().sum() == 0
 
+    @time_record
     def score(self):
         'Return score from B perspective. If W is winning, score is negative.'
         working_board = np.copy(self.board)
@@ -537,6 +580,7 @@ class Position():
 
         return np.count_nonzero(working_board == BLACK) - np.count_nonzero(working_board == WHITE) - self.komi
 
+    @time_record
     def result(self):
         score = self.score()
         if score > 0:
@@ -546,6 +590,7 @@ class Position():
         else:
             return 0
 
+    @time_record
     def result_string(self):
         score = self.score()
         if score > 0:
