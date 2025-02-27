@@ -1,6 +1,6 @@
 import numba, torch, numpy as np
 
-@numba.njit
+# @numba.njit
 def get_neighbors_numba(x, y, w, h):
     """
     (x, y)의 상하좌우 좌표를 반환. 
@@ -16,7 +16,7 @@ def get_neighbors_numba(x, y, w, h):
         neighbors.append((x, y + 1))
     return neighbors
 
-@numba.njit
+# @numba.njit
 def get_group_numba(board, start_x, start_y):
     """
     (start_x, start_y)에 있는 돌( board[start_y,start_x] )과 
@@ -43,7 +43,7 @@ def get_group_numba(board, start_x, start_y):
 
     return visited
 
-@numba.njit
+# @numba.njit
 def get_liberties_numba(board, group):
     """
     그룹(group)에 대해 공배(자유도) 좌표 세트를 구함.
@@ -61,7 +61,7 @@ def get_liberties_numba(board, group):
                     liberties.append((nx, ny))
     return liberties
 
-@numba.njit
+# @numba.njit
 def remove_dead_stones_numba(board, x, y, current_player):
     """
     (x, y)에 착수 후, 주변 상대 돌 중 공배가 0인 그룹 제거.
@@ -87,7 +87,7 @@ def remove_dead_stones_numba(board, x, y, current_player):
                 dead_count += len(group)
     return board, dead_count
 
-@numba.njit
+# @numba.njit
 def is_valid_move_numba(board, prev_board, x, y, current_player):
     """
     착수 가능 여부 확인 (자충수/패규칙 등)
@@ -126,7 +126,7 @@ def is_valid_move_numba(board, prev_board, x, y, current_player):
     else:
         raise ValueError("Invalid prev_board shape")
 
-@numba.njit
+# @numba.njit
 def get_territory_numba(board):
     """
     board 상의 빈 칸(0)들에 대해 Flood Fill 방식으로
@@ -184,7 +184,7 @@ def get_territory_numba(board):
                 #  세부 해석이 다르지만, 여기서는 단순 무효로 처리)
     return black_territory, white_territory
 
-@numba.njit
+# @numba.njit
 def check_independent_liberties(board, liberties):
     """
     주어진 공배(liberties)가 독립된 영역인지 확인.
@@ -212,7 +212,7 @@ def check_independent_liberties(board, liberties):
     return independent_areas
 
 
-@numba.njit
+# @numba.njit
 def calculate_territory_with_alive_groups(board):
     """
     살아있는 돌에 의해 형성된 정당한 집 계산.
@@ -254,7 +254,7 @@ def calculate_territory_with_alive_groups(board):
 
     return black_territory, white_territory         
 
-@numba.njit
+# @numba.njit
 def check_alive_groups(board):
     """
     살아있는 돌 그룹의 집만 인정.
@@ -295,7 +295,7 @@ class FastState:
         self,
         board: np.ndarray,
         current_player: int,
-        dum = 3.5,
+        dum = 0,
         previous_board: np.ndarray = None,
         pass_count: int = 0,
         player_1_dead_stones: int = 0,
@@ -303,6 +303,7 @@ class FastState:
         history: list = None,
         memorize_before: bool = False,
         last = None,
+        least_number_of_stones = 0.3,
     ):
         self.board = board
         self.current_player = current_player
@@ -313,6 +314,7 @@ class FastState:
         self.player_minus_1_dead_stones = player_minus_1_dead_stones
         self.memorize_before = memorize_before
         self.last = last
+        self.least_number_of_stones = least_number_of_stones
         if history is None:
             self.history = []
         else:
@@ -398,13 +400,28 @@ class FastState:
         return False
 
     def get_result(self):
+        # 깔린 수가 적은데 승부를 냈다면 무승부
+        # if (self.board==0).sum() < self.board.ravel().size * self.least_number_of_stones:
+        #     return 0
+        
         black_territory, white_territory = check_alive_groups(self.board)
         black_score = black_territory + self.player_minus_1_dead_stones
         white_score = white_territory + self.player_1_dead_stones
-        if black_score == white_score == 0:
-            return 0  # 무승부
-        return 1 if black_score - self.dum > white_score else -1
+        diff = black_score - self.dum - white_score
+        # print(diff)
+        return 1 if diff > 0 else -1 if diff < 0 else 0
+    
+    def get_verbose_result(self):
+        # 깔린 수가 적은데 승부를 냈다면 무승부
+        # if (self.board==0).sum() < self.board.ravel().size * self.least_number_of_stones:
+        #     return 0
         
+        black_territory, white_territory = check_alive_groups(self.board)
+        black_score = black_territory + self.player_minus_1_dead_stones
+        white_score = white_territory + self.player_1_dead_stones
+        diff = black_score - self.dum - white_score
+        # print(diff)
+        return 1 if diff > 0 else -1 if diff < 0 else 0, black_score, white_score
 
     def to_tensor(self) -> torch.Tensor:
         """

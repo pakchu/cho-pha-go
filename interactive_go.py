@@ -367,16 +367,12 @@ class InteractiveGo:
             pass
         else:
             model_path += f'_{self.board_size}x{self.board_size}.pt'
-        agent_black = AlphaGoZeroNet(board_size=self.board_size)
-        agent_white = AlphaGoZeroNet(board_size=self.board_size)
-        agent_black.to(device)
-        agent_white.to(device)
-        agent_black.load(model_path)
-        agent_white.load(model_path)
-        agent_black.eval()
-        agent_white.eval()
-        agent_black.verbose = False
-        agent_white.verbose = False
+        agent = AlphaGoZeroNet(board_size=self.board_size)
+        agent.to(device)
+        agent.load(model_path)
+        agent.eval()
+        agent.verbose = False
+
 
         empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
         game_state = State(board=empty_board, current_player=1)
@@ -392,27 +388,30 @@ class InteractiveGo:
 
                     if event.type == pygame.MOUSEBUTTONDOWN:
                         # 2) AI 차례
-                        agent = agent_black if game_state.current_player == 1 else agent_white
+
                         with torch.no_grad():
-                            state_tensor = game_state.to_tensor().unsqueeze(0)
-                            tensor, policy_np = agent(state_tensor)
+                        #     state_tensor = game_state.to_tensor().unsqueeze(0)
+                        #     tensor, policy_np = agent(state_tensor)
+                            
+                            move = agent.make_move(game_state)
+                            if move is None:
+                                print(f'{game_state.current_player} skips.')
+                            if move is not None and not game_state.is_valid_move(*move):
+                                running = False
+                                break
 
-                        move = agent.make_move(game_state)
-                        if move is not None and not game_state.is_valid_move(*move):
-                            running = False
-                            break
+                            game_state = game_state.apply_action(move)
+                            self.update_display(game_state)
 
-                        game_state = game_state.apply_action(move)
-                        self.update_display(game_state)
-
-                        if game_state.is_terminal():
-                            winner = game_state.get_result()
-                            if winner == 1:
-                                print("흑(1) 승리!")
-                            elif winner == -1:
-                                print("백(-1) 승리!")
-                            else:
-                                print("무승부!")
+                            if game_state.is_terminal():
+                                result, bt, wt = game_state.get_verbose_result()
+                                print(f"흑(1): {bt}, 백(-1): {wt}")
+                                if result == 1:
+                                    print("흑(1) 승리!")
+                                elif result == -1:
+                                    print("백(-1) 승리!")
+                                else:
+                                    print("무승부!")
 
             except KeyboardInterrupt:
                 running = False
