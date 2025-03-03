@@ -162,6 +162,7 @@ class InteractiveGo:
         player_black=True, 
         model_path=None, 
         device="cpu",
+        number_of_simulations=100,
     ):
         """
         사람 vs AI 모드 + (옵션) 대국 데이터 학습에 활용.
@@ -211,7 +212,7 @@ class InteractiveGo:
 
                     elif event.type == pygame.MOUSEBUTTONDOWN:
                         mouse_pos = pygame.mouse.get_pos()
-
+                        human_skipped = False
                         # 1) Reset 버튼 체크
                         if self.is_button_pressed(mouse_pos, 10, self.screen_height - 50, 100, 40):
                             empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
@@ -224,6 +225,7 @@ class InteractiveGo:
                         # Skip 버튼 체크
                         elif self.is_button_pressed(mouse_pos, 120, self.screen_height - 50, 100, 40):
                             if turn == 1:
+                                human_skipped = True
                                 game_state.pass_count += 1
                                 turn = -turn
                                 game_state.current_player = -game_state.current_player
@@ -268,16 +270,20 @@ class InteractiveGo:
 
                         # (A) 사람이 둘 차례
                         if turn == 1:
-                            if 0 <= board_x < self.board_size and 0 <= board_y < self.board_size:
+                            print(board_x, board_y)
+                            if 0 <= board_x <= self.board_size + self.margin and 0 <= board_y <= self.board_size + self.margin:
                                 if game_state.is_valid_move(board_x, board_y):
                                     # 1) 현재 상태 텐서
                                     state_tensor = game_state.to_tensor()
 
                                     # 2) 사람이 둔 수 → one-hot
                                     board_sz = self.board_size
-                                    human_probs = np.zeros((board_sz * board_sz,), dtype=np.float32)
-                                    idx = board_y * board_sz + board_x
-                                    human_probs[idx] = 1.0
+                                    human_probs = np.zeros((board_sz * board_sz+1,), dtype=np.float32)
+                                    if human_skipped:
+                                        human_probs[-1] = 1.0
+                                    else:
+                                        idx = board_y * board_sz + board_x
+                                        human_probs[idx] = 1.0
 
                                     # 3) 임시로 (state, one-hot, None) 저장
                                     data_this_game.append((state_tensor.squeeze(0), human_probs, None))
@@ -307,9 +313,9 @@ class InteractiveGo:
                             agent.eval()
                             with torch.no_grad():
                                 state_tensor = game_state.to_tensor().unsqueeze(0)
-                                tensor, policy_np = agent(state_tensor)
+                                board_tensor, policy_np = agent(state_tensor)
 
-                            move = agent.make_move(game_state)
+                            move, probs = agent.make_move(game_state)
                             
                             # when ai skips & game is valid
                             if move is not None and not game_state.is_valid_move(*move):
@@ -330,7 +336,7 @@ class InteractiveGo:
                                 # 전체 데이터에 결과 부여
                                 final_data = []
                                 for (st, ap, _) in data_this_game:
-                                    final_data.append((st, ap, winner))
+                                    final_data.append((st, ap, -winner))
                                 if replay_buffer is not None:
                                     replay_buffer.store(final_data)
                                 data_this_game.clear()
@@ -343,7 +349,7 @@ class InteractiveGo:
             model=agent,
             replay_buffer=replay_buffer,
             batch_size=1,
-            epochs=10,
+            epochs=1000,
         )
         agent.save(
             '/'.join(model_path.split('/')[:-1] + ['vs_human_trained_' + model_path.split('/')[-1]]) if 'vs_human' not in model_path else model_path
@@ -354,7 +360,7 @@ class InteractiveGo:
         pygame.quit()
 
 
-    def run_ai_vs_ai(self, model_path=None, device='cpu'):
+    def run_ai_vs_ai(self, model_path=None, device='cpu', number_of_simulations=100):
         """
         AI vs AI 대국.
         """
@@ -393,7 +399,11 @@ class InteractiveGo:
                         #     state_tensor = game_state.to_tensor().unsqueeze(0)
                         #     tensor, policy_np = agent(state_tensor)
                             
-                            move = agent.make_move(game_state)
+                            move, probs = agent.make_move(game_state, number_of_simulations)
+                            pass_prob = probs[-1]
+                            probs = probs[:-1].reshape(self.board_size, self.board_size)
+                            print(probs)
+                            print(pass_prob)
                             if move is None:
                                 print(f'{game_state.current_player} skips.')
                             if move is not None and not game_state.is_valid_move(*move):
@@ -412,6 +422,7 @@ class InteractiveGo:
                                     print("백(-1) 승리!")
                                 else:
                                     print("무승부!")
+                                running = False
 
             except KeyboardInterrupt:
                 running = False
@@ -429,4 +440,5 @@ if __name__ == "__main__":
 
     # 2) 5x5 보드에서 사람(흑) vs AI
     game = InteractiveGo(board_size=5)
-    game.run_ai_vs_ai()
+    # game.run_ai_vs_ai()
+    game.run_player_vs_player()

@@ -27,7 +27,7 @@ class AlphaGoZeroNet(nn.Module):
         # 네트워크 크기 동적 조정
         if board_size <= 9:
             self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
-            self.num_residual_blocks = 5  # Residual Block 개수 축소
+            self.num_residual_blocks = 30  # Residual Block 개수 축소
         elif board_size <= 13:
             self.num_filters = 128
             self.num_residual_blocks = 12
@@ -171,11 +171,55 @@ class AlphaGoZeroNet(nn.Module):
                 node = node.parent
         return root
 
-    def make_move(self, state: State, temperature=1.0):
-        """현재 상태에서 MCTS를 이용해 행동 선택"""
+    def make_move(self, state: State, temperature=1.0, num_simulations=800):
+        """
+        현재 상태에서 MCTS를 이용해 행동 선택 및 해당 확률 분포 반환.
+        Returns:
+        chosen_action: 선택된 행동 (예: (x, y) 또는 None, pass)
+        full_action_probs: (board_size^2 + 1,) 형태의 numpy array, 각 인덱스는 해당 착수 확률 (마지막 원소는 pass)
+        """
         self.eval()
-        root = self.mcts_search(state, num_simulations=800)
-        return root.best_action(temperature=temperature, verbose=self.verbose)
+        root = self.mcts_search(state, num_simulations=num_simulations)
+        board_size = state.board.shape[0]
+
+        # 루트 노드의 자식들로부터 방문 수와 행동 목록 추출
+        actions = list(root.children.keys())
+
+        visits = np.array([root.children[a].visits for a in actions], dtype=np.float32)
+
+        # 방문 수로 확률 분포 계산 (모두 0이면 균등 분포)
+        if np.sum(visits) > 0:
+            probs = visits / np.sum(visits)
+        else:
+            probs = np.ones_like(visits) / len(visits)
+
+        # board_size^2 + 1 길이의 전체 행동 확률 벡터 구성 (마지막은 pass)
+        full_action_probs = np.zeros(board_size * board_size + 1, dtype=np.float32)
+        for i, action in enumerate(actions):
+            if action is None:
+                if state.is_pass_available():
+                    full_action_probs[-1] = probs[i]
+                else:
+                    full_action_probs[-1] = 0
+                    visits[i] = 0
+            else:
+                x, y = action
+                idx = y * board_size + x
+                full_action_probs[idx] = probs[i]
+
+        # # 온도(temperature)에 따른 행동 선택
+        # if temperature == 0 or root.N > 3:
+        #     chosen_action = max(actions, key=lambda a: root.children[a].visits)
+
+        # else:
+        #     adjusted = visits ** (1.0 / temperature)
+        #     adjusted = adjusted / np.sum(adjusted)
+        #     chosen_action = actions[np.random.choice(len(actions), p=adjusted)]
+        
+
+
+        
+        return root.best_action(), full_action_probs
 
 #####################################
 # 2. MCTS 구현
@@ -183,18 +227,22 @@ class AlphaGoZeroNet(nn.Module):
 class MCTSNode:
     def __init__(self, state: State, parent=None):
         self.state = state
+        self.N = (abs(self.state.board).sum())
         self.parent = parent
         self.children = {}
         self.visits = 0
         self.value_sum = 0
         self.policy = 0  # 이 노드(action)에 대한 사전 확률
+        self.action = None  # 이 노드로 이끈 행동 (None이면 패스)
 
     def expand(self, action_probs):
         """모든 합법 착수에 대해 자식 노드 확장"""
         for action, prob in action_probs:
             if action not in self.children:
-                self.children[action] = MCTSNode(self.state.apply_action(action), parent=self)
-                self.children[action].policy = prob
+                child = MCTSNode(self.state.apply_action(action), parent=self)
+                child.policy = prob
+                child.action = action  # 착수를 기록
+                self.children[action] = child
 
     def select_child(self, exploration_param=1.4):
         """UCB 최대화 기준으로 자식 노드 선택"""
@@ -211,7 +259,12 @@ class MCTSNode:
         if child.visits == 0:
             return float('inf')
         avg_value = child.value_sum / child.visits
-        ucb = avg_value + exploration_param * child.policy * np.sqrt(np.log(self.visits) / child.visits)
+        # 패스(move None)에 대해 사전 확률에 페널티를 적용 (예: 0.5배)
+        if child.action is None:
+            adjusted_policy = child.policy * 0.5
+        else:
+            adjusted_policy = child.policy
+        ucb = avg_value + exploration_param * adjusted_policy * np.sqrt(np.log(self.visits) / child.visits)
         return ucb
 
     def update(self, value):
@@ -224,27 +277,32 @@ class MCTSNode:
         가장 좋은 행동 리턴.
         temperature=0이면 방문 수가 가장 많은 행동을,
         그 외에는 방문 수 비례 샘플링.
+        가능한 경우 패스(move None)는 후보에서 배제함.
         """
         if len(self.children) == 0:
             return None
 
-        if temperature == 0:
-            return max(self.children.keys(), key=lambda a: self.children[a].visits)
+        # 가능한 행동 중 패스가 아닌 행동만 후보로 선정 (있다면)
+        non_pass_actions = [a for a in self.children.keys() if a is not None]
+        if non_pass_actions:
+            candidates = non_pass_actions
         else:
-            visits = np.array([child.visits for child in self.children.values()], dtype=np.float32)
-            # 모든 방문 횟수가 0이면 균등 확률 분포 사용
+            candidates = list(self.children.keys())
+
+        if temperature == 0 or self.N > 5:
+            return max(candidates, key=lambda a: self.children[a].visits)
+        else:
+            visits = np.array([self.children[a].visits for a in candidates], dtype=np.float32)
             if np.sum(visits) == 0:
                 probs = np.ones_like(visits) / len(visits)
             else:
                 adjusted = visits ** (1.0 / temperature)
                 probs = adjusted / np.sum(adjusted)
-            # 부동소수점 오차로 인한 문제를 방지하기 위해 재정규화
+            # 재정규화
             probs = probs / np.sum(probs)
-            actions = list(self.children.keys())
             if verbose:
                 print(f"Normalized probabilities: {probs}, Sum: {np.sum(probs)}")
-
-            return actions[np.random.choice(len(actions), p=probs)]
+            return candidates[np.random.choice(len(candidates), p=probs)]
 
 
 #####################################
@@ -256,51 +314,22 @@ def self_play(model: AlphaGoZeroNet, init_state: State, num_simulations=800, tem
     게임이 종료될 때까지 MCTS로 행동 선택 후,
     (state_tensor, action_probs, result)를 리턴.
     """
-    # model = model.to(device)
+    _device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     data = []  # (state_tensor, action_probs, result)
     current_state = init_state
 
     while not current_state.is_terminal():
-        root = model.mcts_search(current_state, num_simulations)
-        visits = np.array([child.visits for child in root.children.values()], dtype=np.float32)
-        actions = list(root.children.keys())
-        probs = visits / np.sum(visits)
-
-        if temperature == 0:
-            action = max(root.children, key=lambda a: root.children[a].visits)
-        else:
-            visits = visits ** (1.0 / temperature)
-            visits /= np.sum(visits)
-            if len(actions) > 0:
-                action = actions[np.random.choice(len(actions), p=visits)]
-            else:
-                if current_state.is_terminal():
-                    break
-
-        board_size = current_state.board.shape[0]
-        # full_action_probs: (board_size^2 + 1) 차원으로 수정 (마지막 원소가 pass)
-        full_action_probs = np.zeros((board_size * board_size + 1,), dtype=np.float32)
-        for i, act in enumerate(actions):
-            if act is None:
-                full_action_probs[-1] = probs[i]
-            else:
-                x, y = act
-                idx = y * board_size + x
-                full_action_probs[idx] = probs[i]
-
+        # make_move를 이용하여 행동 선택 및 확률 분포 반환
+        action, full_action_probs = model.make_move(current_state, temperature=temperature, num_simulations=num_simulations)
         state_tensor = current_state.to_tensor()  # shape: (17, board_size, board_size)
         data.append((state_tensor, full_action_probs, None))
         current_state = current_state.apply_action(action)
 
-    if debug:
-        from go import go_board
-        print(f"Game Over: {current_state.get_result()}")
-        print(current_state.board)
-        print(go_board.get_territory_numba(current_state.board))
     reward = current_state.get_result()  # 결과
 
     final_data = []
     for i, (st, ap, _) in enumerate(data):
+        # 자기 대국 데이터 생성 시, 번갈아 결과를 뒤집어 저장
         adjusted_result = reward if i % 2 == 0 else -reward
         final_data.append((st, ap, adjusted_result))
     print(f"Game Result: {reward}")
@@ -331,14 +360,15 @@ class ReplayBuffer:
         action_probs: (B, H*W + 1)
         results: (B,)
         """
+        device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
         if len(self.buffer) < batch_size:
             return None, None, None
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         batch = [self.buffer[idx] for idx in indices]
         states, action_probs, results = zip(*batch)
-        states = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
-        action_probs = torch.tensor(np.array(action_probs), dtype=torch.float32, device=self.device)
-        results = torch.tensor(np.array(results), dtype=torch.float32, device=self.device)
+        states = torch.tensor(np.array(states), dtype=torch.float32, device=device)
+        action_probs = torch.tensor(np.array(action_probs), dtype=torch.float32, device=device)
+        results = torch.tensor(np.array(results), dtype=torch.float32, device=device)
         return states, action_probs, results
 
 #####################################
@@ -347,6 +377,9 @@ class ReplayBuffer:
 @timeit
 def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, earlystopping=20, optimizer_state_dict=None):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    _device = model.device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+    model.to(device)
     model.optimizer = optimizer
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
@@ -366,9 +399,9 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
         policy_output, value_output = model(states.to(model.device))
 
         # Policy Loss: 크로스 엔트로피 (예측과 타깃 비교)
-        policy_loss = -torch.sum(action_probs * torch.log(policy_output + 1e-7), dim=1).mean()
+        policy_loss = -torch.sum((action_probs).to(device) * torch.log(policy_output + 1e-7), dim=1).mean()
         value_output = value_output.squeeze()
-        value_loss = F.mse_loss(value_output, results)
+        value_loss = F.mse_loss(value_output, results.to(device))
         loss = policy_loss + value_loss
 
         optimizer.zero_grad()
@@ -377,18 +410,19 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
 
         model.losses[len(model.losses)].append(loss.item())
 
-        if earlystopping is not None:
-            if best_model is None or loss.item() == min(model.losses[len(model.losses)]):
-                best_model = model.copy()
-                patience = earlystopping
-            elif epoch > min_epoch:
-                patience -= 1
-                if patience == 0:
-                    print(f"Epoch {epoch + 1}/{epochs} - Early Stopping")
-                    break
+        # if earlystopping is not None:
+        #     if best_model is None or loss.item() == min(model.losses[len(model.losses)]):
+        #         best_model = model.copy()
+        #         patience = earlystopping
+        #     elif epoch > min_epoch:
+        #         patience -= 1
+        #         if patience == 0:
+        #             print(f"Epoch {epoch + 1}/{epochs} - Early Stopping")
+        #             break
 
         print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
-    model = best_model
+    # model = best_model
+    model.to(_device)
 
 #####################################
 # 7. 실제 학습 루프
