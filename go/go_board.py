@@ -105,10 +105,34 @@ def is_valid_move_numba(board, prev_board, x, y, current_player):
     if board[y, x] != 0:
         return False
 
+    # 2-1) 완전한 집인 경우: (x, y)의 상하좌우 칸이 모두 current_player의 돌이고,
+    #     그 돌들이 하나의 연결 그룹을 이루면, 굳이 돌을 둘 필요가 없음.
+    neighs = get_neighbors_numba(x, y, w, h)
+    if neighs and all(board[ny, nx] == current_player for (nx, ny) in neighs):
+        group = get_group_numba(board, neighs[0][0], neighs[0][1])
+        if all((nx, ny) in group for (nx, ny) in neighs):
+            return False
+    
     # 3) 임시로 돌을 놓음
     temp_board = board.copy()
     temp_board[y, x] = current_player
 
+    
+    all_neighbors_empty = True
+    unique_corner_condition = False
+    if (x, y) in [(0, 0), (0, h-1), (w-1, 0), (w-1, h-1)]:
+        for (nx, ny) in neighs:
+            if board[ny, nx] == 0:
+                if all(board[neigbor_neibor] != 0 for neigbor_neibor in get_neighbors_numba(nx, ny, w, h)):
+                    unique_corner_condition = True
+                    break
+            else:
+                all_neighbors_empty = False
+                
+        if not unique_corner_condition and all_neighbors_empty:
+            return False
+                
+    
     # 4) remove_dead_stones
     temp_board, dead_count = remove_dead_stones_numba(temp_board, x, y, current_player)
 
@@ -295,7 +319,7 @@ class FastState:
         self,
         board: np.ndarray,
         current_player: int,
-        dum = 0,
+        dum = 0.5,
         previous_board: np.ndarray = None,
         pass_count: int = 0,
         player_1_dead_stones: int = 0,
@@ -315,6 +339,7 @@ class FastState:
         self.memorize_before = memorize_before
         self.last = last
         self.least_number_of_stones = least_number_of_stones
+        self.valid_moves = []
         if history is None:
             self.history = []
         else:
@@ -332,6 +357,9 @@ class FastState:
             memorize_before=self.memorize_before,
             last = self.last.copy() if self.last is not None else None,
         )
+        
+    def is_pass_available(self):
+        return len(self.get_legal_actions()) <= 2
 
     def is_valid_move(self, x, y):
         # Numba 함수 호출
@@ -381,6 +409,8 @@ class FastState:
         return new_state
 
     def get_legal_actions(self):
+        if self.valid_moves:
+            return self.valid_moves
         actions = []
         h, w = self.board.shape
         prev_board = self.previous_board if self.previous_board is not None else None
@@ -390,12 +420,11 @@ class FastState:
                     actions.append((xx, yy))
         # 패스
         actions.append(None)
+        self.valid_moves = actions
         return actions
 
     def is_terminal(self):
         if self.pass_count >= 2:
-            return True
-        if len(self.get_legal_actions()) == 1:  # only None
             return True
         return False
 
@@ -425,51 +454,100 @@ class FastState:
 
     def to_tensor(self) -> torch.Tensor:
         """
-        총 17채널 (C=17)짜리 numpy array를 만든 뒤, (1, 17, H, W) 형태의 PyTorch 텐서로 반환.
+        현재 게임 상태를 AlphaGo Zero 논문의 입력 형식인 (1, 17, H, W) 형태의 텐서로 변환.
         
-        구체적 구성:
-        - channel 0: 현재 보드 (흑=1, 백=-1, 빈=0)
-        - channel 1~15: 최근 7, 8번의 history 보드 (가장 최근이 channel 1, 그 전이 channel 2, ...)
-
-        - channel 16: 현재 플레이어 (흑 차례=1.0, 백 차례=0.0) 
+        구성:
+        - 채널 0~7: 지난 8 시점의 보드 상태에서, 현재 플레이어의 돌 위치 (1이면 돌, 0이면 없음)
+        - 채널 8~15: 지난 8 시점의 보드 상태에서, 상대 플레이어의 돌 위치 (1이면 돌, 0이면 없음)
+        - 채널 16: 현재 플레이어 표시 (흑이면 모든 위치 1, 백이면 모든 위치 0)
+        
+        보드 상태는 게임 시작부터 현재까지 self.history의 (x, y, player) 정보를
+        순차적으로 적용해 재구성합니다.
         """
-        h, w = self.board.shape
-        c = 17
-        tensor = np.zeros((c, h, w), dtype=np.float32)
-
-        # (1) 채널 0 -> 현재 보드 (직접 흑=1, 백=-1, 빈=0 으로 저장)
-        #     이미 self.board 자체가 {1, -1, 0} 값을 가지므로 그대로 복사
-        tensor[0, :, :] = self.board
-
-        # (2) 최근 6개 history 보드 채널 (channel 1~13)
-        #     history[-1] = 가장 최근 상태
-        #     history[-2] = 그 이전 ...
-        max_moves = 12
-        history_len = len(self.history)
-        for i in range(max_moves):
-            if i >= history_len:
-                break
-            move = self.history[- i - 1]
+        h, w = self.board.shape  # 예: 19, 19
+        tensor = np.zeros((17, h, w), dtype=np.float32)
+        
+        # (1) 게임 시작부터 현재까지의 보드 상태 재구성
+        # board_states[i]는 i번째 move 후의 보드 상태 (board_states[0]는 빈 보드)
+        board_states = []
+        current_state = np.zeros((h, w), dtype=np.int8)
+        board_states.append(current_state.copy())
+        for move in self.history:
             x, y, player = move
-            if player == 1:
-                tensor[i//2 + 1, y, x] = 1.0
+            # (캡처 등은 고려하지 않고 단순히 돌을 놓는다고 가정)
+            current_state[y, x] = player
+            board_states.append(current_state.copy())
+        
+        # 현재까지 진행된 move 수 (board_states의 마지막 인덱스 = len(self.history))
+        t = len(self.history)
+        
+        # (2) 지난 8 시점의 보드 상태로부터 채널 채우기
+        # i=0 : t-7번째 상태, i=7 : t번째 (현재) 상태
+        for i in range(8):
+            state_index = t - 7 + i  # t가 7 미만이면 음수가 될 수 있음.
+            if state_index < 0:
+                # 게임 시작 이전: 빈 보드 상태
+                state = board_states[0]
             else:
-                tensor[7 + i//2, y, x] = -1.0
+                state = board_states[state_index]
+            # 현재 플레이어의 돌: 해당 위치가 self.current_player인 경우 1, 아니면 0
+            tensor[i] = (state == self.current_player).astype(np.float32)
+            # 상대 플레이어의 돌: 해당 위치가 -self.current_player인 경우 1, 아니면 0
+            tensor[i + 8] = (state == -self.current_player).astype(np.float32)
         
-        # (3) channel 14~15는 사석 정보
-        tensor[14, :, :] = self.player_1_dead_stones if self.current_player == 1 else self.player_minus_1_dead_stones
-        tensor[15, :, :] = self.player_minus_1_dead_stones if self.current_player == 1 else self.player_1_dead_stones
+        # (3) 채널 16: 현재 플레이어 표시
+        # 논문에서는 흑(1) 차례이면 1, 백(-1) 차례이면 0으로 표기
+        tensor[16] = 1.0 if self.current_player == 1 else 0.0
         
+        # 최종적으로 (17, H, W)를 (1, 17, H, W) 텐서로 변환하여 반환
+        return torch.tensor(tensor, dtype=torch.float32)#.unsqueeze(0)
 
-        # (4) channel 16 -> 현재 플레이어 표시
-        #     알파고 제로 논문에선 (흑 차례=1, 백 차례=0) 식의 binary plane
-        #     (또는 흑=1, 백=-1)을 쓰는 구현도 있지만 여기선 1.0 / 0.0 예시
-        if self.current_player == 1:
-            # 흑 차례
-            tensor[16, :, :] = 1.0
-        else:
-            # 백 차례
-            tensor[16, :, :] = -1.0
+    
+def test_is_valid_move_complete_territory():
+    # 5x5 보드 생성 (초기에는 모두 빈칸 0)
+    board = np.zeros((5, 5), dtype=np.int32)
+    current_player = 1  # 예: 흑돌
+    
+    # 3x3 블록 내에서 (2,2)만 빈 칸으로 두고 나머지는 모두 흑돌로 채웁니다.
+    # 좌표 (1,1)부터 (3,3)까지 채우되 (2,2)는 건너뜁니다.
+    for y in range(1, 4):
+        for x in range(1, 4):
+            if (x, y) != (2, 2):
+                board[y, x] = current_player
+                
+    board[4, 1] = 1
+    board[4, 3] = 1
+    board[3, 4] = 1
 
-        # 마지막으로 (17, H, W)를 (1, 17, H, W)로 만들어 리턴
-        return torch.tensor(tensor, dtype=torch.float32)
+    print(board)
+    # 이전 보드는 모두 빈 상태로 초기화
+    prev_board = np.zeros_like(board)
+    
+    # (2,2)는 빈 칸이지만 상하좌우 (즉, (2,1), (2,3), (1,2), (3,2))가 모두 흑돌이고,
+    # 이들 돌이 하나의 연결 그룹을 이루므로, 이미 완벽한 집으로 간주되어 착수할 필요가 없습니다.
+    valid = is_valid_move_numba(board, prev_board, 2, 2, current_player)
+
+    print("Test Complete Territory: Move at (2,2) should be invalid (False). Got:", valid)
+    assert valid == False, "Expected move at (2,2) to be invalid (already complete territory)."
+
+    # (2, 4) 는 빈 칸이지만 상하좌우 (즉, (2,3), (1,4), (3,4))가 모두 흑돌이고,
+    # 이들 돌이 하나의 연결 그룹을 이루므로, 이미 완벽한 집으로 간주되어 착수할 필요가 없습니다.
+    valid = is_valid_move_numba(board, prev_board, 2, 4, current_player)
+    print("Test Complete Territory: Move at (2,4) should be invalid (False). Got:", valid)
+    assert valid == False, "Expected move at (2,4) to be invalid (already complete territory)."
+    
+    # (4, 4)는 빈 칸이지만 상하좌우 (즉, (4,3), (3,4))가 모두 흑돌이고,
+    # 이들 돌이 하나의 연결 그룹을 이루므로, 이미 완벽한 집으로 간주되어 착수할 필요가 없습니다.
+    valid = is_valid_move_numba(board, prev_board, 4, 4, current_player)
+    print("Test Complete Territory: Move at (4,4) should be invalid (False). Got:", valid)
+    assert valid == False, "Expected move at (4,4) to be invalid (already complete territory)."
+    
+    # (0,0)은 주변에 돌이 없으므로 정상적인 착수로 간주되어야 합니다.
+    valid_edge = is_valid_move_numba(board, prev_board, 0, 0, current_player)
+    print("Test Non-surrounded: Move at (0,0) should be valid (True). Got:", valid_edge)
+    assert valid_edge == True, "Expected move at (0,0) to be valid."
+
+    print("All tests passed.")
+
+if __name__ == "__main__":
+    test_is_valid_move_complete_territory()
