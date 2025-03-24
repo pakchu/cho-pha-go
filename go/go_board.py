@@ -16,6 +16,7 @@ def get_neighbors_numba(x, y, w, h):
         neighbors.append((x, y + 1))
     return neighbors
 
+
 # @numba.njit
 def get_group_numba(board, start_x, start_y):
     """
@@ -87,6 +88,14 @@ def remove_dead_stones_numba(board, x, y, current_player):
                 dead_count += len(group)
     return board, dead_count
 
+def completely_alive_numba(board, group):
+    """
+    주어진 그룹이 완전히 살아있는지 확인.
+    연결되지 않은 공배가 2개 이상이면 살아있음.
+    """
+    pass
+    
+
 # @numba.njit
 def is_valid_move_numba(board, prev_board, x, y, current_player):
     """
@@ -118,19 +127,19 @@ def is_valid_move_numba(board, prev_board, x, y, current_player):
     temp_board[y, x] = current_player
 
     
-    all_neighbors_empty = True
-    unique_corner_condition = False
-    if (x, y) in [(0, 0), (0, h-1), (w-1, 0), (w-1, h-1)]:
-        for (nx, ny) in neighs:
-            if board[ny, nx] == 0:
-                if all(board[neigbor_neibor] != 0 for neigbor_neibor in get_neighbors_numba(nx, ny, w, h)):
-                    unique_corner_condition = True
-                    break
-            else:
-                all_neighbors_empty = False
+    # all_neighbors_empty = True
+    # unique_corner_condition = False
+    # if (x, y) in [(0, 0), (0, h-1), (w-1, 0), (w-1, h-1)]:
+    #     for (nx, ny) in neighs:
+    #         if board[ny, nx] == 0:
+    #             if all(board[neigbor_neibor] != 0 for neigbor_neibor in get_neighbors_numba(nx, ny, w, h)):
+    #                 unique_corner_condition = True
+    #                 break
+    #         else:
+    #             all_neighbors_empty = False
                 
-        if not unique_corner_condition and all_neighbors_empty:
-            return False
+    #     if not unique_corner_condition and all_neighbors_empty:
+    #         return False
                 
     
     # 4) remove_dead_stones
@@ -428,29 +437,16 @@ class FastState:
             return True
         return False
 
-    def get_result(self):
-        # 깔린 수가 적은데 승부를 냈다면 무승부
-        # if (self.board==0).sum() < self.board.ravel().size * self.least_number_of_stones:
-        #     return 0
+    def get_result(self): 
+        # 사석 제거
         
-        black_territory, white_territory = check_alive_groups(self.board)
+        black_territory, white_territory = get_territory_numba(self.board)
         black_score = black_territory + self.player_minus_1_dead_stones
         white_score = white_territory + self.player_1_dead_stones
         diff = black_score - self.dum - white_score
         # print(diff)
         return 1 if diff > 0 else -1 if diff < 0 else 0
     
-    def get_verbose_result(self):
-        # 깔린 수가 적은데 승부를 냈다면 무승부
-        # if (self.board==0).sum() < self.board.ravel().size * self.least_number_of_stones:
-        #     return 0
-        
-        black_territory, white_territory = check_alive_groups(self.board)
-        black_score = black_territory + self.player_minus_1_dead_stones
-        white_score = white_territory + self.player_1_dead_stones
-        diff = black_score - self.dum - white_score
-        # print(diff)
-        return 1 if diff > 0 else -1 if diff < 0 else 0, black_score, white_score
 
     def to_tensor(self) -> torch.Tensor:
         """

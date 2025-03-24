@@ -62,7 +62,8 @@ def main():
             args.save_path = f'models/{args.save_path}'
         if not args.save_path.endswith(f'{args.board_size}x{args.board_size}.pt'):
             args.save_path += f'_{args.board_size}x{args.board_size}.pt'
-        
+
+    os.environ.setdefault('BOARD_SIZE', str(args.board_size))
     # --------------------------------------------------------
     # 1) 학습(train)
     # --------------------------------------------------------
@@ -95,14 +96,18 @@ def main():
         interactive = interactive_go.InteractiveGo(
             board_size=args.board_size,
         )
-        if args.ai_vs_ai:
+        if args.ai_vs_ai: 
             interactive.run_ai_vs_ai(
-                model_path=args.pretrained_model_path
+                model_path=args.pretrained_model_path,
+                device=args.device,
+                number_of_simulations=args.num_simulations
             )
         else:
             interactive.run_player_vs_ai(
                 player_black=args.player_black,
-                model_path=args.pretrained_model_path
+                model_path=args.pretrained_model_path,
+                device=args.device,
+                number_of_simulations=args.num_simulations
             )
 
     # 만약 train이나 play 옵션 둘 다 없으면, 도움말 출력
