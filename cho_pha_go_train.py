@@ -173,7 +173,7 @@ class AlphaGoZeroNet(nn.Module):
             # 3) Backpropagation
             while node is not None:
                 node.update(value)
-                value = -value
+                # value = -value
                 node = node.parent
         return root
 
@@ -340,8 +340,9 @@ def self_play(model: AlphaGoZeroNet, init_position: Position, num_simulations=80
     for i, (st, ap, _) in enumerate(data):
         # 자기 대국 데이터 생성 시, 번갈아 결과를 뒤집어 저장
         # print(i)
-        adjusted_result = reward if i % 2 == 0 else -reward
-        final_data.append((st, ap, adjusted_result))
+        # adjusted_result = reward if i % 2 == 0 else -reward
+        # final_data.append((st, ap, adjusted_result))
+        final_data.append((st, ap, reward))
         # final_data.append((
         #     torch.tensor(np.array(st), dtype=torch.float32, device=_device), 
         #     torch.tensor(np.array(ap), dtype=torch.float32, device=_device), 

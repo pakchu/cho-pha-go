@@ -251,7 +251,7 @@ class InteractiveGo:
                                         
                                     data_this_game.clear()
                                     empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
-                                    game_state = Position(empty_board, current_player=1, memorize_before=True)
+                                    game_state = Position()
                                     turn = 1 if player_black else -1
                                     self.update_display(game_state)
 
@@ -259,7 +259,7 @@ class InteractiveGo:
                         elif self.is_button_pressed(mouse_pos, 230, self.screen_height - 50, 100, 40):
                             if len(data_this_game) > 0:
                                 data_this_game.pop()
-                                game_state = game_state.last
+                                game_state = game_state.undo_move()
                                 turn = -turn
                                 self.update_display(game_state)
                                 continue
@@ -277,9 +277,9 @@ class InteractiveGo:
                             if 0 <= board_x <= self.board_size + self.margin and 0 <= board_y <= self.board_size + self.margin:
                                 legal_moves = game_state.all_legal_moves()
                                 legal_moves = [(y, x) for x in range(self.board_size) for y in range(self.board_size) if legal_moves[y * self.board_size + x]]
-                                if (board_x, board_y) in legal_moves:
+                                if (board_y, board_x) in legal_moves:
                                     # 1) 현재 상태 텐서
-                                    state_tensor = extract_features(game_state, AGZ_FEATURES)
+                                    state_tensor = torch.tensor(extract_features(game_state, AGZ_FEATURES), dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
 
                                     # 2) 사람이 둔 수 → one-hot
                                     board_sz = self.board_size
@@ -291,10 +291,10 @@ class InteractiveGo:
                                         human_probs[idx] = 1.0
 
                                     # 3) 임시로 (state, one-hot, None) 저장
-                                    data_this_game.append((state_tensor.squeeze(0), human_probs, None))
+                                    data_this_game.append((state_tensor, human_probs, None))
 
                                     # 착수
-                                    game_state = game_state.play_move((board_x, board_y))
+                                    game_state = game_state.play_move((board_y, board_x))
                                     turn = -turn
                                     self.update_display(game_state)
 
@@ -317,7 +317,7 @@ class InteractiveGo:
                             
                             agent.eval()
                             with torch.no_grad():
-                                state_tensor = extract_features(game_state, AGZ_FEATURES).unsqueeze(0)
+                                state_tensor = torch.tensor(extract_features(game_state, AGZ_FEATURES), dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
                                 board_tensor, policy_np = agent(state_tensor)
 
                             move, probs = agent.make_move(game_state)
@@ -331,7 +331,7 @@ class InteractiveGo:
                                 break
 
                             # (state_tensor, policy 전체, None) 저장
-                            data_this_game.append((state_tensor.squeeze(0).squeeze(0), policy_np, None))
+                            data_this_game.append((state_tensor, policy_np, None))
 
                             # 착수
 
@@ -358,6 +358,7 @@ class InteractiveGo:
             replay_buffer=replay_buffer,
             batch_size=1,
             epochs=1000,
+            
         )
         agent.save(
             '/'.join(model_path.split('/')[:-1] + ['vs_human_trained_' + model_path.split('/')[-1]]) if 'vs_human' not in model_path else model_path
@@ -418,6 +419,7 @@ class InteractiveGo:
 
                             legal_moves = game_state.all_legal_moves()
                             legal_moves = [(y, x) for x in range(self.board_size) for y in range(self.board_size) if legal_moves[y * self.board_size + x]]
+                            print(legal_moves)
                             if move is not None and not move in legal_moves:
                                 running = False
                                 break

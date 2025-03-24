@@ -439,6 +439,28 @@ class Position():
         pos.to_play *= -1
         return pos
 
+    def undo_move(self):
+        if len(self.recent) == 0:
+            return self
+        last_move = self.recent[-1].move
+        if last_move is None:
+            second_last_move = self.recent[-2].move
+            if second_last_move is None:
+                return self
+            else:
+                # two passes in a row
+                return self.pass_move()
+        pos = copy.deepcopy(self)
+        color, move = pos.recent[-1]
+        pos.recent = pos.recent[:-1]
+        pos.n -= 1
+        pos.caps = (pos.caps[0] - color, pos.caps[1] + color)
+        place_stones(pos.board, EMPTY, [move])
+        pos.lib_tracker = LibertyTracker.from_board(pos.board)
+        pos.board_deltas = pos.board_deltas[1:]
+        pos.to_play = color
+        return pos
+    
     def get_liberties(self):
         return self.lib_tracker.liberty_cache
 
@@ -497,9 +519,12 @@ class Position():
         return pos
 
     def is_game_over(self):
-        return (len(self.recent) >= 2 and
-                self.recent[-1].move is None and
-                self.recent[-2].move is None)
+        return (
+            len(self.recent) >= N * N // 2 and
+            self.recent[-1].move is None and
+            self.recent[-2].move is None and
+            (len(self.lib_tracker.groups) >= 2 or all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]))
+        )
 
     def score(self):
         'Return score from B perspective. If W is winning, score is negative.'
