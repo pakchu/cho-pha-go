@@ -27,9 +27,12 @@ class AlphaGoZeroNet(nn.Module):
         self.optimizer = None
         self.verbose = verbose
         # 네트워크 크기 동적 조정
-        if board_size <= 9:
-            self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
+        if board_size <= 5:
+            self.num_filters = 16  # 작은 보드에서는 필터 수를 줄임
             self.num_residual_blocks = 18  
+        elif board_size <= 9:
+            self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
+            self.num_residual_blocks = 20  
         elif board_size <= 13:
             self.num_filters = 128
             self.num_residual_blocks = 30
@@ -121,7 +124,7 @@ class AlphaGoZeroNet(nn.Module):
         print(f"Model saved to {path}.")
 
     def load(self, path):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.load_state_dict(checkpoint['model_state_dict'])
         self.losses = checkpoint['losses']
         print(f"Model loaded from {path}.")
@@ -222,7 +225,7 @@ class AlphaGoZeroNet(nn.Module):
         
 
 
-        action, probs = root.best_action(), full_action_probs
+        action, probs = root.best_action(temperature=temperature), full_action_probs
         # print(action)
         # print(probs)
         return action, probs
@@ -315,7 +318,14 @@ class MCTSNode:
 # 4. 자가 대국 (self-play)
 #####################################
 @timeit
-def self_play(model: AlphaGoZeroNet, init_position: Position, num_simulations=800, temperature=1.0, debug=False, device='cpu'):
+def self_play(
+    model: AlphaGoZeroNet, 
+    init_position: Position, 
+    num_simulations=800, 
+    temperature=1.0, 
+    debug=False, 
+    device='cpu'
+):
     """
     게임이 종료될 때까지 MCTS로 행동 선택 후,
     (state_tensor, action_probs, result)를 리턴.
@@ -395,7 +405,7 @@ class ReplayBuffer:
 # 6. 모델 학습 함수
 #####################################
 @timeit
-def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=1e-3, earlystopping=20, optimizer_state_dict=None):
+def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, epochs, learning_rate=5e-4, earlystopping=20, optimizer_state_dict=None):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     _device = model.device
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
@@ -409,7 +419,7 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
 
     min_epoch = len(replay_buffer.buffer) // batch_size
     min_epoch *= (min_epoch) ** 0.5
-
+    episode_loss = 0
     for epoch in range(epochs):
         states, action_probs, results = replay_buffer.sample(batch_size)
         if states is None:
@@ -437,8 +447,6 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
         loss.backward()
         optimizer.step()
 
-        model.losses[len(model.losses)].append(loss.item())
-
         # if earlystopping is not None:
         #     if best_model is None or loss.item() == min(model.losses[len(model.losses)]):
         #         best_model = model.copy()
@@ -450,6 +458,8 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
         #             break
 
         print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
+        episode_loss = loss.item()
+    model.losses[len(model.losses)].append(episode_loss / epochs)
     # model = best_model
     model.to(_device)
 
@@ -464,7 +474,22 @@ def self_play_worker(args):
     except KeyboardInterrupt:
         return None
 
-def train(board_size=19, num_iterations=10, games_per_iteration=3, num_simulations=50, batch_size=16, epochs=100, learning_rate=1e-3, earlystopping=20, capacity=2000, device=None, pretrained_model_path=None, save_model_path=None, num_workers=4):
+def train(
+    board_size=19, 
+    num_iterations=10, 
+    games_per_iteration=3, 
+    num_simulations=50, 
+    batch_size=16, 
+    epochs=100, 
+    learning_rate=5e-4, 
+    earlystopping=20, 
+    capacity=2000, 
+    device=None, 
+    pretrained_model_path=None, 
+    save_model_path=None, 
+    temperature=1.0,
+    num_workers=4
+):
     model = AlphaGoZeroNet(board_size=board_size)
     optimizer_state_dict = None
     if pretrained_model_path is not None and os.path.exists(pretrained_model_path):
@@ -503,7 +528,7 @@ def train(board_size=19, num_iterations=10, games_per_iteration=3, num_simulatio
                     model,
                     init_state, 
                     num_simulations=num_simulations, 
-                    temperature=1.0
+                    temperature=temperature
                 )
                 replay_buffer.store(game_data)
             

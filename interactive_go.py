@@ -166,6 +166,7 @@ class InteractiveGo:
         model_path=None, 
         device="cpu",
         number_of_simulations=100,
+        temperature=1.0
     ):
         """
         사람 vs AI 모드 + (옵션) 대국 데이터 학습에 활용.
@@ -320,7 +321,7 @@ class InteractiveGo:
                                 state_tensor = torch.tensor(extract_features(game_state, AGZ_FEATURES), dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
                                 board_tensor, policy_np = agent(state_tensor)
 
-                            move, probs = agent.make_move(game_state)
+                            move, probs = agent.make_move(game_state, temperature, number_of_simulations)
                             
                             # when ai skips & game is valid
 
@@ -369,7 +370,13 @@ class InteractiveGo:
         pygame.quit()
 
 
-    def run_ai_vs_ai(self, model_path=None, device='cpu', number_of_simulations=100):
+    def run_ai_vs_ai(
+        self, 
+        model_path=None, 
+        device='cpu',
+        temperature=1.0,
+        number_of_simulations=100
+    ):
         """
         AI vs AI 대국.
         """
@@ -389,7 +396,8 @@ class InteractiveGo:
         agent.verbose = False
 
 
-        empty_board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
+        empty_board = np.zeros((self.board_size, 
+        self.board_size), dtype=np.int8)
         game_state = Position(board=empty_board)
 
         running = True
@@ -408,7 +416,7 @@ class InteractiveGo:
                         #     state_tensor = extract_features(game_state, asdf).unsqueeze(0)
                         #     tensor, policy_np = agent(state_tensor)
                             
-                            move, probs = agent.make_move(game_state, number_of_simulations)
+                            move, probs = agent.make_move(game_state, temperature, number_of_simulations)
                             pass_prob = probs[-1]
                             probs = probs[:-1].reshape(self.board_size, self.board_size)
                             print(probs.T)

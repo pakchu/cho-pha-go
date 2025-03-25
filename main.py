@@ -13,6 +13,7 @@ def main():
                         help="Set the board size (default=5)")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Device to use: 'cpu', 'cuda:0', 'mps' etc.")
+    parser.add_argument('--temperature', '-t', type=float, default=1.0, help='Temperature for MCTS.')
 
     # 플레이 관련 옵션
     parser.add_argument("--play", action="store_true", default=True,
@@ -83,7 +84,8 @@ def main():
             capacity=args.capacity,
             device=args.device,
             pretrained_model_path=args.pretrained_model_path,
-            save_model_path=args.save_path
+            save_model_path=args.save_path,
+            temperature=args.temperature
         )
 
     # --------------------------------------------------------
@@ -100,14 +102,16 @@ def main():
             interactive.run_ai_vs_ai(
                 model_path=args.pretrained_model_path,
                 device=args.device,
-                number_of_simulations=args.num_simulations
+                number_of_simulations=args.num_simulations,
+                temperature=args.temperature
             )
         else:
             interactive.run_player_vs_ai(
                 player_black=args.player_black,
                 model_path=args.pretrained_model_path,
                 device=args.device,
-                number_of_simulations=args.num_simulations
+                number_of_simulations=args.num_simulations,
+                temperature=args.temperature
             )
 
     # 만약 train이나 play 옵션 둘 다 없으면, 도움말 출력

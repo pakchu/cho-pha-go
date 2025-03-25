@@ -522,8 +522,7 @@ class Position():
         return (
             len(self.recent) >= N * N // 2 and
             self.recent[-1].move is None and
-            self.recent[-2].move is None and
-            (len(self.lib_tracker.groups) >= 2 or all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]))
+            self.recent[-2].move is None
         )
 
     def score(self):
@@ -547,6 +546,8 @@ class Position():
         return np.count_nonzero(working_board == BLACK) - np.count_nonzero(working_board == WHITE) - self.komi
 
     def result(self):
+        if len(self.lib_tracker.groups) == 1 and all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]):
+            return -list(self.lib_tracker.groups.values())[0].color
         score = self.score()
         if score > 0:
             return 1
