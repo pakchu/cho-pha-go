@@ -25,7 +25,7 @@ and the features from AGZ as AGZ_FEATURES.
 """
 
 import numpy as np
-import go.minigo as go
+import minigo.minigo as go
 import utils
 import torch
 
@@ -196,3 +196,5 @@ MLPERF07_FEATURES_PLANES = sum(f.planes for f in MLPERF07_FEATURES)
 def extract_features(position, features):
     return np.concatenate([feature(position) for feature in features], axis=2)
 
+def to_default_tensor(position, features=AGZ_FEATURES):
+    return torch.tensor(extract_features(position, features), dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)

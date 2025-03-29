@@ -13,16 +13,19 @@ def main():
                         help="Set the board size (default=5)")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Device to use: 'cpu', 'cuda:0', 'mps' etc.")
-    parser.add_argument('--temperature', '-t', type=float, default=1.0, help='Temperature for MCTS.')
+    parser.add_argument('--temperature', '-t', type=str, default='1.0', help='Temperature for MCTS.')
 
     # 플레이 관련 옵션
     parser.add_argument("--play", action="store_true", default=True,
                         help="If set, run player vs AI after optional training.")
-    parser.add_argument("--player-black", action="store_true", default=True,
+    parser.add_argument("--player-black", action="store_true", default=False,
                         help="If set, human player is black (default is white).")
     parser.add_argument("--ai-vs-ai", action="store_true", default=False,
                         help="If set, run AI vs AI game.")
 
+    parser.add_argument('--random-vs-ai', action="store_true", default=False,
+                        help="If set, run random vs AI game.")
+    
     # 학습 관련 옵션
     parser.add_argument("--train", action="store_true", default=False,
                         help="If set, train the model.")
@@ -43,15 +46,17 @@ def main():
                         help="Learning rate for training (default=0.001)")
     parser.add_argument("--save-path", "-s", type=str, default=None,
                         help="Path to save the trained model.")
-    parser.add_argument("--early-stopping", default=None, type=Optional[int],
-                        help="Number of iterations to wait for improvement before early stopping.")
+    parser.add_argument("--exploration", default=1., type=float,
+                        help="Exploration constant for MCTS (default=1.)")
+    parser.add_argument("--network-trust", default=0.25, type=float,
+                        help="Network trust for MCTS (default=0.25)")
 
     # 모델 경로
     parser.add_argument("--pretrained-model-path", "-p", type=str, default=None,
                         help="Path to a pretrained model (.pt).")
 
     args = parser.parse_args()
-    
+    args.temperature = float(args.temperature)
     if args.pretrained_model_path is not None:
         if not args.pretrained_model_path.startswith('models/'):
             args.pretrained_model_path = f'models/{args.pretrained_model_path}'
@@ -79,13 +84,14 @@ def main():
             num_simulations=args.num_simulations,
             batch_size=args.batch_size,
             epochs=args.epochs,
-            earlystopping=args.early_stopping,
             learning_rate=args.learning_rate,
             capacity=args.capacity,
             device=args.device,
             pretrained_model_path=args.pretrained_model_path,
             save_model_path=args.save_path,
-            temperature=args.temperature
+            temperature=args.temperature,
+            exploration=args.exploration,
+            network_trust=args.network_trust
         )
 
     # --------------------------------------------------------
@@ -102,15 +108,22 @@ def main():
             interactive.run_ai_vs_ai(
                 model_path=args.pretrained_model_path,
                 device=args.device,
-                number_of_simulations=args.num_simulations,
+                num_simulations=args.num_simulations,
                 temperature=args.temperature
             )
-        else:
+        elif args.random_vs_ai:
+            interactive.run_random_vs_ai(
+                model_path=args.pretrained_model_path,
+                device=args.device,
+                num_simulations=args.num_simulations,
+                temperature=args.temperature
+            )
+        else:    
             interactive.run_player_vs_ai(
                 player_black=args.player_black,
                 model_path=args.pretrained_model_path,
                 device=args.device,
-                number_of_simulations=args.num_simulations,
+                num_simulations=args.num_simulations,
                 temperature=args.temperature
             )
 

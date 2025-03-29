@@ -284,7 +284,7 @@ class LibertyTracker():
 
 
 class Position():
-    def __init__(self, board=None, n=0, komi=1.5, caps=(0, 0),
+    def __init__(self, board=None, n=0, komi=7.5, caps=(0, 0),
                  lib_tracker=None, ko=None, recent=tuple(),
                  board_deltas=None, to_play=BLACK):
         """
@@ -361,7 +361,23 @@ class Position():
         details = "\nMove: {}. Captures X: {} O: {}\n".format(
             self.n, *captures)
         return annotated_board + details
+    
+    def __repr__(self):
+        return self.__str__()
 
+    # def is_perfect_eye(self, c):
+    #     'Check if c is a perfect eye for to_play'
+    #     if self.board[c] != EMPTY:
+    #         return False
+    #     for n in NEIGHBORS[c]:
+    #         if self.board[n] != self.to_play:
+    #             return False
+    #     # check connectivity of neighboring friendly stones
+    #     neighbor_group = [g for g in self.lib_tracker.group]
+    #     for n in NEIGHBORS[c]:
+    #         self.lib_tracker.group_index[n] 
+    #     return True
+    
     def is_move_suicidal(self, move):
         potential_libs = set()
         for n in NEIGHBORS[move]:
@@ -464,7 +480,7 @@ class Position():
     def get_liberties(self):
         return self.lib_tracker.liberty_cache
 
-    def play_move(self, c, color=None, mutate=False):
+    def play_move(self, coord, color=None, mutate=False):
         # Obeys CGOS Rules of Play. In short:
         # No suicides
         # Chinese/area scoring
@@ -474,25 +490,25 @@ class Position():
 
         pos = self if mutate else copy.deepcopy(self)
 
-        if c is None:
+        if coord is None:
             pos = pos.pass_move(mutate=mutate)
             return pos
 
-        if not self.is_move_legal(c):
+        if not self.is_move_legal(coord):
             raise IllegalMove("{} move at {} is illegal: \n{}".format(
                 "Black" if self.to_play == BLACK else "White",
-                c, self))
+                coord, self))
 
-        potential_ko = is_koish(self.board, c)
+        potential_ko = is_koish(self.board, coord)
 
-        place_stones(pos.board, color, [c])
-        captured_stones = pos.lib_tracker.add_stone(color, c)
+        place_stones(pos.board, color, [coord])
+        captured_stones = pos.lib_tracker.add_stone(color, coord)
         place_stones(pos.board, EMPTY, captured_stones)
 
         opp_color = color * -1
 
         new_board_delta = np.zeros([N, N], dtype=np.int8)
-        new_board_delta[c] = color
+        new_board_delta[coord] = color
         place_stones(new_board_delta, color, captured_stones)
 
         if len(captured_stones) == 1 and potential_ko == opp_color:
@@ -508,7 +524,7 @@ class Position():
         pos.n += 1
         pos.caps = new_caps
         pos.ko = new_ko
-        pos.recent += (PlayerMove(color, c),)
+        pos.recent += (PlayerMove(color, coord),)
 
         # keep a rolling history of last 7 deltas - that's all we'll need to
         # extract the last 8 board states.
@@ -523,6 +539,8 @@ class Position():
             len(self.recent) >= N * N // 2 and
             self.recent[-1].move is None and
             self.recent[-2].move is None
+        ) or (
+            self.caps[BLACK] > 10 or self.caps[WHITE] > 10
         )
 
     def score(self):
@@ -543,11 +561,13 @@ class Position():
                 territory_color = UNKNOWN  # dame, or seki
             place_stones(working_board, territory_color, territory)
 
-        return np.count_nonzero(working_board == BLACK) - np.count_nonzero(working_board == WHITE) - self.komi
+        return np.count_nonzero(working_board == BLACK) - np.count_nonzero(working_board == WHITE) - self.komi + self.caps[BLACK] - self.caps[WHITE]
 
     def result(self):
-        if len(self.lib_tracker.groups) == 1 and all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]):
-            return -list(self.lib_tracker.groups.values())[0].color
+        # if len(self.lib_tracker.groups) == 1 and all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]):
+        #     return -list(self.lib_tracker.groups.values())[0].color
+        # elif len(self.lib_tracker.groups) == 2 and all([len(g.liberties) > 1 for g in self.lib_tracker.groups.values()]):
+        #     return 0
         score = self.score()
         if score > 0:
             return 1
@@ -565,3 +585,18 @@ class Position():
         else:
             return 'DRAW'
     
+    
+        
+if __name__ == '__main__':
+    p = Position(np.array(
+        [[0,1,0,0,0],
+        [1,0,0,0,0],
+        [0,1,0,0,0],
+        [0,0,0,0,0],
+        [0,0,0,0,0]]
+    ), to_play=WHITE)
+    print(p.all_legal_moves())
+    x, y = (4,0)
+    p=p.play_move((4,0), WHITE)
+    print(p.all_legal_moves())
+    print(p)

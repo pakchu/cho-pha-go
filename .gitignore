@@ -3,3 +3,4 @@
 # **/*test*
 *.pt
 !models/cho_pha_go_5x5.pt
+*replay_buffer.pkl
