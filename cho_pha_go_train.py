@@ -3,12 +3,13 @@ import os
 import multiprocessing as mp
 import pickle
 import numpy as np
+import pandas as pd
 from collections import deque, defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from minigo.minigo import Position
+from minigo.minigo import Position, BLACK, WHITE
 from minigo.features import to_default_tensor
 import warnings
 from utils import timeit
@@ -29,8 +30,8 @@ class AlphaGoZeroNet(nn.Module):
         self.verbose = verbose
         # 네트워크 크기 동적 조정
         if board_size <= 5:
-            self.num_filters = 32  # 작은 보드에서는 필터 수를 줄임
-            self.num_residual_blocks = 10
+            self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
+            self.num_residual_blocks = 9
         elif board_size <= 9:
             self.num_filters = 64  # 작은 보드에서는 필터 수를 줄임
             self.num_residual_blocks = 9
@@ -115,23 +116,64 @@ class AlphaGoZeroNet(nn.Module):
         model.losses = copy.copy(self.losses)
         return model
 
-    def save(self, path):
+    def save(self, path, training_state=None):
+        """Save model with optional training state information"""
         tail = f'{self.board_size}x{self.board_size}' in path
         path = path + f'_{self.board_size}x{self.board_size}.pt' if not tail else path
-        torch.save({
-            'model_state_dict': self.state_dict(),
-            'losses': self.losses
-        }, path)
+        
+        save_dict = {
+            'state_dict': self.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
+            'losses': dict(self.losses),
+            'board_size': self.board_size,
+        }
+        
+        # Save additional training state if provided
+        if training_state is not None:
+            save_dict.update(training_state)
+            
+        torch.save(save_dict, path)
         print(f"Model saved to {path}.")
+        
+        # Also save a training state file for easier inspection
+        if training_state is not None:
+            state_path = path.replace('.pt', '_state.json')
+            import json
+            # Convert any non-serializable items to strings
+            clean_state = {}
+            for k, v in training_state.items():
+                if isinstance(v, (int, float, str, bool, list, dict)) or v is None:
+                    clean_state[k] = v
+                else:
+                    clean_state[k] = str(v)
+            
+            with open(state_path, 'w') as f:
+                json.dump(clean_state, f, indent=2)
+            print(f"Training state saved to {state_path}.")
 
     def load(self, path, device):
         checkpoint = torch.load(path, map_location=device, weights_only=False)
-        self.load_state_dict(checkpoint['model_state_dict'])
-        self.losses = checkpoint['losses']
+        self.load_state_dict(checkpoint['state_dict'])
+        self.losses = defaultdict(list, checkpoint['losses'])  # Convert back to defaultdict
+        
+        # Load optimizer state if available
+        optimizer_state_dict = checkpoint.get('optimizer_state_dict', None)
+        
+        # Extract training state (everything except model-specific keys)
+        training_state = {}
+        model_keys = {'state_dict', 'optimizer_state_dict', 'losses', 'board_size'}
+        for key, value in checkpoint.items():
+            if key not in model_keys:
+                training_state[key] = value
+                
         print(f"Model loaded from {path}.")
+        if training_state:
+            print(f"Loaded training state: {', '.join(training_state.keys())}")
+            
+        return optimizer_state_dict, training_state
 
 
-    def make_move(self, position: Position, temperature=1.0, num_simulations=800, ucb_exploration_param=1., network_trust=0.5):
+    def make_move(self, position: Position, temperature=1.0, num_simulations=800, ucb_exploration_param=1., network_trust=0.5, noise_level=0.001):
         """
         현재 상태에서 MCTS를 이용해 행동 선택 및 해당 확률 분포 반환.
         Returns:
@@ -144,7 +186,8 @@ class AlphaGoZeroNet(nn.Module):
             self, 
             position, 
             num_simulations=num_simulations,
-            network_trust=network_trust
+            network_trust=network_trust,
+            noise_level=noise_level
         )
         
         action, probs = root.best_action(temperature=temperature)
@@ -208,7 +251,7 @@ class MCTSNode:
         if child.visits == 0:
             return child.value_sum
         avg_value = child.value_sum / child.visits
-        ucb = self.exploration*avg_value + (1-self.exploration) * child.policy * np.sqrt(np.log(self.visits) / child.visits)
+        ucb = avg_value + self.exploration * child.policy * np.sqrt(np.log(self.visits) / child.visits)
         return ucb
 
     def update(self, value):
@@ -237,7 +280,7 @@ class MCTSNode:
                 idx = y * board_size + x
                 full_action_probs[idx] = self.children[action].visits
             
-        if temperature == 0:
+        if temperature < 0.01:
             return max(candidates, key=lambda a: self.children[a].visits), full_action_probs / np.sum(full_action_probs)
         else:
             visits = np.array([self.children[a].visits for a in candidates], dtype=np.float32)
@@ -255,7 +298,7 @@ class MCTSNode:
 
             return candidates[np.random.choice(len(candidates), p=probs)], full_action_probs
     
-    def search(self, model: AlphaGoZeroNet, state: Position, num_simulations=800, network_trust=0.3):
+    def search(self, model: AlphaGoZeroNet, state: Position, num_simulations=800, network_trust=0.3, noise_level=0.001):
         """MCTS 탐색: root 노드부터 시뮬레이션 수행"""
         root = self
 
@@ -263,7 +306,7 @@ class MCTSNode:
             node = root
             # 1) Selection
             while len(node.children) > 0 and not node.position.is_game_over():
-                node = node.select_child()
+                node = node.select_child(noise_level)
 
             # 2) Expansion
             if not node.position.is_game_over():
@@ -271,7 +314,12 @@ class MCTSNode:
                     state_tensor = to_default_tensor(node.position).to(model.device)
                     policy, value = model(state_tensor)
                     policy = policy.squeeze().cpu().numpy()  # shape: (board_size^2+1,)
-                    value = value.item() * node.position.to_play * -1 * network_trust
+                    
+                    # More explicit handling of value perspective
+                    value = value.item()  # Raw value from network (black's perspective)
+                    if node.position.to_play == WHITE:  # If white to play, flip perspective
+                        value = -value
+                    value = value * network_trust  # Apply network trust
                 board_size = state.board.shape[0]
                 pass_prob = policy[-1]      # 마지막 요소가 pass 확률
                 policy = policy[:-1]        # 나머지는 착수 확률
@@ -297,7 +345,11 @@ class MCTSNode:
                     action_probs = [(a, 1.0 / len(legal_moves)) for a in legal_moves]
                 node.expand(action_probs)
             else:
-                value = node.position.result() * node.position.to_play * -1 # 이전 수로 결과가 났으니
+                # Terminal state value handling
+                game_result = node.position.result()  # Result from black's perspective
+                if node.position.to_play == WHITE:  # If white to play, flip perspective
+                    game_result = -game_result
+                value = game_result  # Already from current player's perspective
             # 3) Backpropagation
 
             while node is not None:
@@ -317,7 +369,8 @@ def self_play(
     num_simulations=800, 
     temperature=1.0,
     exploration=1.4,
-    network_trust=0.25
+    network_trust=0.25,
+    noise_level=0.001
 ):
     """
     게임이 종료될 때까지 MCTS로 행동 선택 후,
@@ -336,7 +389,8 @@ def self_play(
             temperature=temperature, 
             num_simulations=num_simulations, 
             ucb_exploration_param=exploration, 
-            network_trust=network_trust
+            network_trust=network_trust,
+            noise_level=noise_level
         )
         state_tensor = to_default_tensor(current_position).to(model.device)
 
@@ -430,11 +484,8 @@ def train_model(model: AlphaGoZeroNet, replay_buffer: ReplayBuffer, batch_size, 
         policy_loss = -torch.sum((action_probs).to(device) * torch.log(policy_output + 1e-7), dim=1).mean()
         value_output = value_output.squeeze()
         value_loss = F.mse_loss(value_output, results.to(device))
-        # loss = policy_loss + value_loss
-        l2_lambda = 1e-4  # 정규화 계수
-        l2_penalty = sum([torch.sum(param ** 2) for param in model.parameters()])
 
-        loss = policy_loss + value_loss + l2_lambda * l2_penalty
+        loss = policy_loss + value_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -483,36 +534,78 @@ def train(
     exploration=1.4,
     network_trust=0.25,
     renew_replay_buffer=False,
+    noise_level=0.001,
     num_workers=4
 ):
     model = AlphaGoZeroNet(board_size=board_size)
+    
+    # Initialize training state variables
+    start_iteration = 0
+    optimizer_state_dict = None
+    training_state = None
+    
+    # Load pretrained model and training state if available
+    if pretrained_model_path is not None and os.path.exists(pretrained_model_path):
+        optimizer_state_dict, training_state = model.load(pretrained_model_path, device)
+        
+        # Extract training state variables if available
+        if training_state:
+            start_iteration = training_state.get('current_iteration', 0)
+            network_trust = training_state.get('network_trust', network_trust)
+            exploration = training_state.get('exploration', exploration)
+            temperature = training_state.get('temperature', temperature)
+            noise_level = training_state.get('noise_level', noise_level)
+            print(f"Continuing training from iteration {start_iteration} with:")
+            print(f"  network_trust={network_trust}, exploration={exploration}")
+            print(f"  temperature={temperature}, noise_level={noise_level}")
+    
+    # Set up device and model
+    device = torch.device(device)
+    print(f"Using device: {device}")
+    model = model.to(device)
+    model.verbose = False
+    model.to(torch.float32)
+    
+    # Load or create replay buffer
     if os.path.exists('replay_buffer.pkl') and not renew_replay_buffer:
         replay_buffer: ReplayBuffer = pickle.load(open('replay_buffer.pkl', 'rb'))
         replay_buffer.resize(capacity)
         print(f"Replay buffer loaded from replay_buffer.pkl. Size: {len(replay_buffer.buffer)}")
     else:
         replay_buffer = ReplayBuffer(capacity=capacity, device=device)
-     
-    optimizer_state_dict = None
-    if pretrained_model_path is not None and os.path.exists(pretrained_model_path):
-        model.load(pretrained_model_path, device)
-    device = torch.device(device)
-    print(device)
-    model = model.to(device)
-    model.verbose = False
-    model.to(torch.float32)
+        
+    gamma = 0.99
     
-    replay_buffer = ReplayBuffer(capacity=capacity, device=device)
-
+    from curriculum_learning import CurriculumLearning
+    curriculum = CurriculumLearning(replay_buffer=replay_buffer, device=device)
+    
+    hp_schedule = curriculum.create_progressive_schedule(num_iterations=num_iterations)
+    
     try:
-        for it in range(num_iterations):
-            print(f"\n=== Iteration {it+1} / {num_iterations} ===")
+        # Only preload curriculum if starting fresh (not continuing)
+        if start_iteration == 0:
+            curriculum_positions = int(capacity * 0.2)
+            print(f"\nPreloading {curriculum_positions} curriculum positions to guide learning...")
+            curriculum.generate_center_curriculum(num_positions=curriculum_positions // 2)
+            curriculum.generate_opening_book(num_positions=curriculum_positions // 2)
+        
+        # Continue from where we left off
+        for it in range(start_iteration, start_iteration + num_iterations):
+            current_iteration = it
+            print(f"\n=== Iteration {it+1} / {start_iteration + num_iterations} ===")
             
-            # print(f"Starting self-play with {games_per_iteration} games...")
-            # Multi Process
-            # empty_board = np.zeros((board_size, board_size), dtype=np.int32)
-            # states = [(model, State(empty_board.copy(), current_player=1), num_simulations, 1.0) for _ in range(games_per_iteration)]
-            # with mp.Pool(processes=num_workers) as pool:
+            # Apply hyperparameter schedule if not continuing with saved values
+            if training_state is None or 'network_trust' not in training_state:
+                for schedule_it, nt, exp, temp, noise in hp_schedule:
+                    if schedule_it == (it - start_iteration):  # Adjust for starting iteration
+                        network_trust = nt
+                        exploration = exp
+                        temperature = temp
+                        noise_level = noise
+                        break
+            
+            print(f"Hyperparameters: network_trust={network_trust:.2f}, exploration={exploration:.2f}, ")
+            print(f"                temperature={temperature:.2f}, noise_level={noise_level:.4f}")
             #     results = pool.map(self_play_worker, states)
             # for game_data in results:
             #     if game_data is not None:
@@ -532,15 +625,33 @@ def train(
                     num_simulations=num_simulations, 
                     temperature=temperature,
                     exploration=exploration,
-                    network_trust=network_trust
+                    network_trust=network_trust,
+                    noise_level=noise_level
                 )
                 replay_buffer.store(game_data)
             
             print("Training...")
-            train_model(model, replay_buffer, batch_size=batch_size, epochs=epochs, learning_rate=learning_rate, earlystopping=earlystopping, optimizer_state_dict=optimizer_state_dict)
+            # Pass the optimizer state dict to maintain training momentum
+            optimizer_state_dict = train_model(model, replay_buffer, batch_size=batch_size, epochs=epochs, 
+                                               learning_rate=learning_rate, earlystopping=earlystopping, 
+                                               optimizer_state_dict=optimizer_state_dict)
+            
+            # Save model along with training state
             if save_model_path is None:
                 save_model_path = f'models/cho_pha_go'
-            model.save(save_model_path)
+            
+            # Create training state dictionary
+            current_training_state = {
+                'current_iteration': current_iteration + 1,  # Save next iteration to start from
+                'network_trust': network_trust,
+                'exploration': exploration,
+                'temperature': temperature,
+                'noise_level': noise_level,
+                'training_timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            # Save model with training state
+            model.save(save_model_path, training_state=current_training_state)
     except KeyboardInterrupt:
         pickle.dump(replay_buffer, open('replay_buffer.pkl', 'wb'))
         model.save(save_model_path)

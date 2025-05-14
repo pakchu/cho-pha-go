@@ -50,6 +50,8 @@ def main():
                         help="Exploration constant for MCTS (default=1.)")
     parser.add_argument("--network-trust", default=0.25, type=float,
                         help="Network trust for MCTS (default=0.25)")
+    parser.add_argument("--noise-level", default=0.003, type=float,
+                        help="Noise level for MCTS (default=0.25)")
 
     # 모델 경로
     parser.add_argument("--pretrained-model-path", "-p", type=str, default=None,
@@ -91,7 +93,8 @@ def main():
             save_model_path=args.save_path,
             temperature=args.temperature,
             exploration=args.exploration,
-            network_trust=args.network_trust
+            network_trust=args.network_trust,
+            noise_level=args.noise_level,
         )
 
     # --------------------------------------------------------
