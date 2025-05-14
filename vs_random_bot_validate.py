@@ -8,12 +8,13 @@ import argparse
 
 parser = argparse.ArgumentParser(description='Cho Pha Go')
 parser.add_argument('--ai-black', default=False, action='store_true', help='AI plays black')
+parser.add_argument('--device', '-d', default='cpu', help='Device to use: cpu, cuda, mps etc.')
 args = parser.parse_args()
 
 board_size = 5  # 테스트용 작은 보드
 model = AlphaGoZeroNet(board_size=board_size)
-model.load('models/cho_pha_go_5x5.pt', 'cpu')
-
+model.load('models/cho_pha_go_5x5.pt', args.device)
+model = model.to(args.device)
 os.environ.setdefault('BOARD_SIZE', str(board_size))
 
 p = Position()
